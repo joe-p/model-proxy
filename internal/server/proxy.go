@@ -13,7 +13,11 @@ type requestLog struct {
 	method         string
 	path           string
 	remoteAddr     string
+	userAgent      string
 	keyName        string
+	policyName     string
+	policyMode     string
+	policyModels   []string
 	alias          string
 	provider       string
 	upstream       string

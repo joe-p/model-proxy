@@ -112,6 +112,7 @@ func postChat(t *testing.T, proxyURL, key, body string) *http.Response {
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "model-proxy-test-client/1.0")
 	req.Header.Set("X-Request-ID", "client-request-id")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -249,6 +250,7 @@ func TestChatRewritesModelAndPassesResponseThrough(t *testing.T) {
 	waitForLog(t, logs, `"cost_usd":0.0001`)
 	waitForLog(t, logs, `"total_tokens":15`)
 	waitForLog(t, logs, `"alias":"fast"`)
+	waitForLog(t, logs, `"user_agent":"model-proxy-test-client/1.0"`)
 }
 
 func TestChatPassesThroughUpstreamError(t *testing.T) {
@@ -464,7 +466,7 @@ func TestPoliciesRestrictChatAndModelListing(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+	proxy, logs := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
 		cfg.Keys = []config.VirtualKey{
 			{Name: "allow-fast", Key: "allow-fast-key", Policy: "only-fast"},
 			{Name: "deny-fast", Key: "deny-fast-key", Policy: "no-fast"},
@@ -482,6 +484,9 @@ func TestPoliciesRestrictChatAndModelListing(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("whitelisted status = %d, body = %s", resp.StatusCode, body)
 	}
+	waitForLog(t, logs, `"policy":"only-fast"`)
+	waitForLog(t, logs, `"policy_mode":"whitelist"`)
+	waitForLog(t, logs, `"policy_models":["fast"]`)
 
 	// Alias outside the whitelist is rejected before reaching upstream.
 	resp = postChat(t, proxy.URL, "allow-fast-key", `{"model":"smart","messages":[]}`)

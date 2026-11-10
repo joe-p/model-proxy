@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/joe-p/model-proxy/internal/auth"
+	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/provider"
 )
 
@@ -35,9 +36,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, lr, errInvalidAPIKey())
 		return
 	}
-	if key != nil {
-		lr.keyName = key.Name
-	}
+	logKey(lr, st.cfg, key)
 
 	aliases := make([]string, 0, len(st.cfg.Models))
 	for alias := range st.cfg.Models {
@@ -90,9 +89,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, lr, errInvalidAPIKey())
 		return
 	}
-	if key != nil {
-		lr.keyName = key.Name
-	}
+	logKey(lr, cfg, key)
 
 	body, err := readRequestBody(w, r, cfg.Server.MaxBodyBytes)
 	if err != nil {
@@ -231,6 +228,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, logRecordFrom(r.Context()), errNotFound())
+}
+
+// logKey records the authenticated key and the policy that applies to it.
+func logKey(lr *requestLog, cfg *config.Config, key *config.VirtualKey) {
+	if key == nil {
+		return
+	}
+	lr.keyName = key.Name
+	if key.Policy == "" {
+		return
+	}
+	lr.policyName = key.Policy
+	policy, ok := cfg.Policies[key.Policy]
+	if !ok {
+		return
+	}
+	lr.policyMode = policy.Mode
+	lr.policyModels = make([]string, 0, len(policy.Models))
+	for alias := range policy.Models {
+		lr.policyModels = append(lr.policyModels, alias)
+	}
+	sort.Strings(lr.policyModels)
 }
 
 func readRequestBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {

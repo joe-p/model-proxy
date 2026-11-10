@@ -177,7 +177,8 @@ Upstream 4xx/5xx responses are returned with their original status and body.
 ### Logging
 
 Logs go to stderr as JSON by default. Access-log fields include request ID,
-method, path, status, latency, bytes out, key name, alias, provider, upstream
+method, path, status, latency, bytes out, user agent, key name, the key's active
+policy (`policy`, `policy_mode`, and `policy_models`), alias, provider, upstream
 model, stream flag, error code, and client-cancellation state. When
 `logging.log_usage` is enabled, the proxy observes the response body without
 changing it and adds `prompt_tokens`, `completion_tokens`, `total_tokens`, and

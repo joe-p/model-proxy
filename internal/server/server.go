@@ -103,6 +103,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		method:     r.Method,
 		path:       r.URL.Path,
 		remoteAddr: r.RemoteAddr,
+		userAgent:  r.UserAgent(),
 	}
 
 	w.Header().Set("X-Request-ID", lr.requestID)
@@ -136,8 +137,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lr.remoteAddr != "" {
 		attrs = append(attrs, "remote_addr", lr.remoteAddr)
 	}
+	if lr.userAgent != "" {
+		attrs = append(attrs, "user_agent", lr.userAgent)
+	}
 	if lr.keyName != "" {
 		attrs = append(attrs, "key_name", lr.keyName)
+	}
+	if lr.policyName != "" {
+		attrs = append(attrs, "policy", lr.policyName)
+	}
+	if lr.policyMode != "" {
+		attrs = append(attrs, "policy_mode", lr.policyMode)
+	}
+	if len(lr.policyModels) > 0 {
+		attrs = append(attrs, "policy_models", lr.policyModels)
 	}
 	if lr.alias != "" {
 		attrs = append(attrs, "alias", lr.alias)
