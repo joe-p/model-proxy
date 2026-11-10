@@ -13,6 +13,7 @@ provider.
 - JWCC configuration (JSON with comments and trailing commas) with strict
   unknown-field rejection.
 - Virtual keys loaded from environment variables, with optional `.env` support.
+- Optional per-key access-log `user_agent` overrides.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
 - Provider-agnostic interface; the only implementation is OpenRouter.
@@ -110,6 +111,8 @@ OpenRouter attribution headers.
       "name": "ci",
       "key_env": "PROXY_KEY_CI",
       "policy": "no-smart",
+      // Optional access-log User-Agent override for requests using this key.
+      "user_agent": "Open WebUI",
     },
     {
       "name": "admin",
@@ -188,6 +191,9 @@ Rules:
   key must resolve to a non-empty value.
 - A virtual key's `policy` is optional. Keys without a policy may use every
   alias.
+- A virtual key's `user_agent` is optional. When set, it replaces the
+  `user_agent` value in access logs for requests authenticated with that key.
+  It does not change any HTTP header sent to the client or upstream.
 - Policies require a non-empty `name`, a `mode` of `whitelist` or `blacklist`,
   and a non-empty `models` list of configured aliases. Policy names must be
   unique, and every key `policy` reference must exist.
@@ -295,10 +301,11 @@ Upstream 4xx/5xx responses are returned with their original status and body.
 Logs go to stderr as JSON by default. Access-log fields include request ID,
 method, path, status, latency, bytes out, user agent, key name, the key's active
 policy (`policy`, `policy_mode`, and `policy_models`), alias, provider, upstream
-model, stream flag, error code, and client-cancellation state. When
-`logging.log_usage` is enabled, the proxy observes the response body without
-changing it and adds `prompt_tokens`, `completion_tokens`, `total_tokens`, and
-`cost_usd` when available. `cost_usd` is OpenRouter's `usage.cost` (credits,
+model, stream flag, error code, and client-cancellation state. A virtual key's
+`user_agent` setting replaces the client-supplied user agent in the log entry.
+When `logging.log_usage` is enabled, the proxy observes the response body
+without changing it and adds `prompt_tokens`, `completion_tokens`,
+`total_tokens`, and `cost_usd` when available. `cost_usd` is OpenRouter's `usage.cost` (credits,
 1:1 with USD).
 
 Secrets, prompts, and response bodies are never logged.

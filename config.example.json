@@ -35,7 +35,9 @@
     {
       "name": "ci",
       "key_env": "PROXY_KEY_CI",
-      "policy": "no-smart"
+      "policy": "no-smart",
+      // Optional access-log User-Agent override for requests using this key.
+      "user_agent": "Open WebUI"
     },
     {
       "name": "admin",

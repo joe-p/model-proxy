@@ -40,9 +40,10 @@ type rawAuth struct {
 }
 
 type rawVirtualKey struct {
-	Name   string `json:"name"`
-	KeyEnv string `json:"key_env"`
-	Policy string `json:"policy"`
+	Name      string `json:"name"`
+	KeyEnv    string `json:"key_env"`
+	Policy    string `json:"policy"`
+	UserAgent string `json:"user_agent"`
 }
 
 type rawPolicy struct {

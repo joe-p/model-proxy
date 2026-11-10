@@ -394,6 +394,64 @@ func TestLoadResolvesPoliciesAndKeyReferences(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesVirtualKeyUserAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "custom", "key_env": "PROXY_KEY", "user_agent": "  my-client/2.0  "},
+    {"name": "default", "key_env": "PROXY_KEY_2"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("PROXY_KEY_2", "secret-2")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Keys[0].UserAgent; got != "my-client/2.0" {
+		t.Fatalf("user agent = %q, want trimmed override", got)
+	}
+	if got := cfg.Keys[1].UserAgent; got != "" {
+		t.Fatalf("user agent = %q, want empty default", got)
+	}
+}
+
+func TestLoadRejectsInvalidVirtualKeyUserAgent(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "bad", "key_env": "PROXY_KEY", "user_agent": "client\r\nX-Injected: yes"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "user_agent") {
+		t.Fatalf("expected user_agent error, got %v", err)
+	}
+}
+
 func TestLoadRejectsUnknownPolicyReference(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config.json", `{

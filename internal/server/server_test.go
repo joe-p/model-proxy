@@ -253,6 +253,32 @@ func TestChatRewritesModelAndPassesResponseThrough(t *testing.T) {
 	waitForLog(t, logs, `"user_agent":"model-proxy-test-client/1.0"`)
 }
 
+func TestChatUsesVirtualKeyUserAgentInAccessLog(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		cfg.Keys = []config.VirtualKey{
+			{Name: "open-webui", Key: "custom-key", UserAgent: "Open WebUI"},
+		}
+	})
+
+	resp := postChat(t, proxy.URL, "custom-key", `{"model":"fast","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	waitForLog(t, logs, `"key_name":"open-webui"`)
+	waitForLog(t, logs, `"user_agent":"Open WebUI"`)
+	if strings.Contains(logs.String(), `"user_agent":"model-proxy-test-client/1.0"`) {
+		t.Fatalf("client user agent should have been overridden in logs:\n%s", logs.String())
+	}
+}
+
 func TestChatPassesThroughUpstreamError(t *testing.T) {
 	const errorBody = `{"error":{"message":"rate limited","type":"rate_limit"}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

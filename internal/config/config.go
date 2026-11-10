@@ -39,9 +39,10 @@ type AuthConfig struct {
 }
 
 type VirtualKey struct {
-	Name   string
-	Key    string
-	Policy string
+	Name      string
+	Key       string
+	Policy    string
+	UserAgent string
 }
 
 const (

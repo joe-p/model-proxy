@@ -75,11 +75,15 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 	for i, rawKey := range raw.VirtualKeys {
 		name := strings.TrimSpace(rawKey.Name)
 		keyEnv := strings.TrimSpace(rawKey.KeyEnv)
+		userAgent := strings.TrimSpace(rawKey.UserAgent)
 		if name == "" {
 			return nil, fmt.Errorf("virtual_keys[%d].name must not be empty", i)
 		}
 		if keyEnv == "" {
 			return nil, fmt.Errorf("virtual_keys[%d] (%s): key_env must not be empty", i, name)
+		}
+		if err := validateLogValue(userAgent, fmt.Sprintf("virtual_keys[%d] (%s).user_agent", i, name)); err != nil {
+			return nil, err
 		}
 		if _, exists := keyNames[name]; exists {
 			return nil, fmt.Errorf("duplicate virtual key name %q", name)
@@ -97,9 +101,10 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		keyNames[name] = struct{}{}
 		keyValues[key] = name
 		cfg.Keys = append(cfg.Keys, VirtualKey{
-			Name:   name,
-			Key:    key,
-			Policy: strings.TrimSpace(rawKey.Policy),
+			Name:      name,
+			Key:       key,
+			Policy:    strings.TrimSpace(rawKey.Policy),
+			UserAgent: userAgent,
 		})
 	}
 	if cfg.Auth.Enabled && len(cfg.Keys) == 0 {
@@ -230,6 +235,19 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 	}
 
 	return cfg, nil
+}
+
+// validateLogValue rejects control characters that could corrupt logs. Empty
+// values are allowed and mean "use the client-supplied value".
+func validateLogValue(value, field string) error {
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if b == '\t' || (b >= 0x20 && b != 0x7f) {
+			continue
+		}
+		return fmt.Errorf("%s contains an invalid control character", field)
+	}
+	return nil
 }
 
 func parseDuration(value *string, fallback time.Duration, field string) (time.Duration, error) {

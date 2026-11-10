@@ -241,12 +241,16 @@ func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, logRecordFrom(r.Context()), errNotFound())
 }
 
-// logKey records the authenticated key and the policy that applies to it.
+// logKey records the authenticated key, its access-log user-agent override,
+// and the policy that applies to it.
 func logKey(lr *requestLog, cfg *config.Config, key *config.VirtualKey) {
 	if key == nil {
 		return
 	}
 	lr.keyName = key.Name
+	if key.UserAgent != "" {
+		lr.userAgent = key.UserAgent
+	}
 	if key.Policy == "" {
 		return
 	}
