@@ -56,7 +56,7 @@ func run() error {
 		}
 	}()
 
-	srv := server.New(cfg, providers, logger, pricingSvc)
+	srv := server.New(cfg, providers, logger, costEstimator(pricingSvc))
 	logger.Info("starting model-proxy",
 		"version", version,
 		"listen", cfg.Server.Listen,
@@ -117,7 +117,7 @@ func reload(srv *server.Server, path string) (context.CancelFunc, error) {
 	}
 	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stderr)
 	pricingSvc, pricingCancel := startPricing(cfg, logger)
-	if err := srv.Reload(cfg, providers, logger, pricingSvc); err != nil {
+	if err := srv.Reload(cfg, providers, logger, costEstimator(pricingSvc)); err != nil {
 		if pricingCancel != nil {
 			pricingCancel()
 		}
@@ -130,6 +130,16 @@ func reload(srv *server.Server, path string) (context.CancelFunc, error) {
 		"policies", len(cfg.Policies),
 	)
 	return pricingCancel, nil
+}
+
+// costEstimator wraps a possibly nil *pricing.Service so that callers receive a
+// nil interface value. Storing a nil pointer in the interface would defeat the
+// server's nil check and panic on the first estimate.
+func costEstimator(svc *pricing.Service) server.CostEstimator {
+	if svc == nil {
+		return nil
+	}
+	return svc
 }
 
 // startPricing starts the optional models.dev refresh loop. The returned
