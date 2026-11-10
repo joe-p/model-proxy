@@ -16,10 +16,12 @@ interface Options {
 
 const HELP = `model-proxy usage dashboard
 
-Parses model-proxy JSON access logs, stores them in SQLite, and serves a
-dashboard with cost totals and a per-model breakdown.
+Accepts model-proxy JSON access records over POST /ingest or stdout, stores
+them in SQLite, and serves a dashboard with cost totals and a per-model
+breakdown.
 
 Usage:
+  npm start -- [options]                         serve dashboard + POST /ingest
   npm start -- [options] -- <proxy command...>   spawn and wrap the proxy
   npm start -- [options] --file access.log      replay an existing log
   npm start -- [options] --stdin                read logs from stdin
@@ -115,19 +117,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (options.command.length === 0 && !options.file && !options.useStdin) {
-    process.stderr.write(HELP);
-    process.exitCode = 2;
-    return;
-  }
-
   const store = new UsageStore(options.db);
   const server = createServer(store);
   await listen(server, options.host, options.port);
   log(`dashboard on http://${options.host}:${options.port} (db: ${options.db})`);
 
   let child: ChildProcess | undefined;
-  let ingestion: Promise<IngestStats>;
+  let ingestion: Promise<IngestStats> | undefined;
 
   if (options.command.length > 0) {
     const [command, ...args] = options.command;
@@ -158,15 +154,19 @@ async function main(): Promise<void> {
   } else if (options.file) {
     log(`reading ${options.file}`);
     ingestion = ingest(createReadStream(options.file), store);
-  } else {
+  } else if (options.useStdin) {
     log('reading stdin');
     ingestion = ingest(process.stdin, store);
+  } else {
+    log(`waiting for access records on POST http://${options.host}:${options.port}/ingest`);
   }
 
-  ingestion.then(
-    ({ parsed, skipped }) => log(`ingest finished: ${parsed} records, ${skipped} lines skipped`),
-    (err) => log(`ingest failed: ${err instanceof Error ? err.message : String(err)}`),
-  );
+  if (ingestion) {
+    ingestion.then(
+      ({ parsed, skipped }) => log(`ingest finished: ${parsed} records, ${skipped} lines skipped`),
+      (err) => log(`ingest failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
 
   let stopping = false;
   const shutdown = (signal: NodeJS.Signals): void => {

@@ -38,6 +38,8 @@ proxying at `/claude_sub/`.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
 - OpenRouter-compatible usage normalization for non-OpenRouter providers.
 - Token and cost extraction from responses for structured access logs.
+- Optional HTTP push of access-log records to a separate collector, with stdout
+  logging still enabled.
 - Subscription billing-mode tagging for providers such as Codex.
 - Optional models.dev list-price estimates with a configurable refresh timer.
 - Atomic `SIGHUP` reload.
@@ -113,6 +115,17 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
     "format": "json", // json | text
     "level": "info",  // debug | info | warn | error
     "log_usage": true,
+
+    // Optional: push access records to an HTTP collector in addition to
+    // stdout. The collector receives {"records":[...]} and should return any
+    // 2xx. Delivery is asynchronous and best-effort.
+    // "access_sink": {
+    //   "url": "http://dashboard:8787/ingest",
+    //   "batch_size": 250,
+    //   "flush_interval": "1s",
+    //   "timeout": "5s",
+    //   "queue_size": 4096,
+    // }
   },
 
   "auth": {
@@ -818,6 +831,42 @@ models.dev or configured list-price estimate, not actual subscription billing.
 
 Secrets, prompts, and response bodies are never logged.
 
+#### HTTP access-log sink
+
+Set `logging.access_sink.url` to also push access records to an HTTP collector.
+This is useful when the collector runs as a separate service and should receive
+application-level records directly, rather than reading the proxy's container
+logs.
+
+stdout remains enabled. Only records with `msg: "request"` are pushed; startup,
+reload, and internal diagnostic logs stay on stdout. Each delivery is a `POST`
+to the configured URL:
+
+```json
+{"records":[{"time":"...","level":"INFO","msg":"request","request_id":"...","status":200}]}
+```
+
+Records use the same schema as stdout, so a consumer should still deduplicate on
+`request_id`. Any 2xx response is success; other statuses are retried with
+backoff. Delivery is asynchronous and best-effort: a slow or unavailable
+collector never blocks a client request. Retry warnings include `retry_in`; the
+first few attempts and then periodic failures are logged, and a later success
+logs `access log sink recovered`. When the queue is full, records are dropped
+and a warning is logged with the cumulative drop count.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `url` | required | Collector endpoint. `http` or `https`. |
+| `batch_size` | `250` | Records per POST. |
+| `flush_interval` | `1s` | Maximum delay before a partial batch is sent. |
+| `timeout` | `5s` | Per-request HTTP timeout. |
+| `queue_size` | `4096` | In-memory records awaiting delivery. |
+
+The collector must implement `POST /ingest` and return any 2xx. The example
+dashboard includes such an endpoint; see [`examples/dashboard/`](./examples/dashboard/).
+For billing-grade records, treat this as an optimization rather than the only
+copy: keep container stdout or another durable log sink enabled.
+
 #### Usage log schema
 
 With `logging.format` set to `json`, every request produces one line-delimited
@@ -871,7 +920,8 @@ a zero. Cache values are logged as reported, including `0`.
 
 Notes for a consumer that stores these rows:
 
-- Read stdout and parse one JSON object per line.
+- Read stdout and parse one JSON object per line, or consume the batches posted
+  by `logging.access_sink`.
 - Deduplicate on `request_id`. Log shipping can retry, and a unique
   constraint plus an idempotent insert avoids double-counting usage.
 - Keep `cost_usd` and `estimated_api_cost_usd` in separate columns. Either may
@@ -881,9 +931,10 @@ Notes for a consumer that stores these rows:
 - `billing_mode: subscription` means token usage did not incur per-token cost,
   so a missing `cost_usd` is expected.
 
-`examples/dashboard/` contains a runnable TypeScript collector that parses this
-stream into SQLite and serves a dashboard with cost totals, a subscription
-estimate toggle, and a per-model breakdown.
+`examples/dashboard/` contains a runnable TypeScript collector that accepts
+this stream over `POST /ingest` (or from stdout) and stores it in SQLite, then
+serves a dashboard with cost totals, a subscription estimate toggle, and a
+per-model breakdown.
 
 ## Reload and shutdown
 
@@ -911,6 +962,11 @@ docker run --rm -p 8080:8080 \
 
 Set `server.listen = "0.0.0.0:8080"` in the mounted config when running in a
 container.
+
+When the example dashboard runs as a separate service, set its host to
+`0.0.0.0`, use the service name in `logging.access_sink.url` (for example
+`http://dashboard:8787/ingest`), and keep the service on a private network:
+`POST /ingest` is unauthenticated.
 
 ## Development
 

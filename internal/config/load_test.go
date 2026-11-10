@@ -1138,3 +1138,158 @@ func TestLoadRejectsRetiredCompatibilityBlock(t *testing.T) {
 		t.Fatalf("expected unknown-field error for compatibility, got %v", err)
 	}
 }
+
+func TestLoadResolvesAccessSink(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "logging": {
+    "access_sink": {
+      "url": "http://dashboard:8787/ingest",
+      "batch_size": 10,
+      "flush_interval": "250ms",
+      "timeout": "2s",
+      "queue_size": 32
+    }
+  },
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sink := cfg.Logging.AccessSink
+	if !sink.Enabled() {
+		t.Fatal("access sink should be enabled")
+	}
+	if sink.URL != "http://dashboard:8787/ingest" {
+		t.Fatalf("url = %q", sink.URL)
+	}
+	if sink.BatchSize != 10 {
+		t.Fatalf("batch size = %d", sink.BatchSize)
+	}
+	if sink.FlushInterval != 250*time.Millisecond {
+		t.Fatalf("flush interval = %v", sink.FlushInterval)
+	}
+	if sink.Timeout != 2*time.Second {
+		t.Fatalf("timeout = %v", sink.Timeout)
+	}
+	if sink.QueueSize != 32 {
+		t.Fatalf("queue size = %d", sink.QueueSize)
+	}
+}
+
+func TestLoadAccessSinkDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "logging": {"access_sink": {"url": "http://dashboard:8787/ingest"}},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	sink := cfg.Logging.AccessSink
+	if sink.BatchSize != 250 || sink.QueueSize != 4096 {
+		t.Fatalf("unexpected sink sizes: %+v", sink)
+	}
+	if sink.FlushInterval != time.Second || sink.Timeout != 5*time.Second {
+		t.Fatalf("unexpected sink durations: %+v", sink)
+	}
+}
+
+func TestLoadAccessSinkDisabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", baseConfig)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Logging.AccessSink.Enabled() {
+		t.Fatalf("access sink should be disabled: %+v", cfg.Logging.AccessSink)
+	}
+}
+
+func TestLoadRejectsInvalidAccessSink(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "empty url",
+			body: `"logging": {"access_sink": {"url": ""}},`,
+			want: "logging.access_sink.url must not be empty",
+		},
+		{
+			name: "unsupported scheme",
+			body: `"logging": {"access_sink": {"url": "ftp://example.test/ingest"}},`,
+			want: "logging.access_sink.url must use http or https",
+		},
+		{
+			name: "missing host",
+			body: `"logging": {"access_sink": {"url": "http:///ingest"}},`,
+			want: "logging.access_sink.url must include a host",
+		},
+		{
+			name: "non-positive batch size",
+			body: `"logging": {"access_sink": {"url": "http://example.test/ingest", "batch_size": 0}},`,
+			want: "logging.access_sink.batch_size must be positive",
+		},
+		{
+			name: "non-positive queue size",
+			body: `"logging": {"access_sink": {"url": "http://example.test/ingest", "queue_size": 0}},`,
+			want: "logging.access_sink.queue_size must be positive",
+		},
+		{
+			name: "invalid flush interval",
+			body: `"logging": {"access_sink": {"url": "http://example.test/ingest", "flush_interval": "soon"}},`,
+			want: "logging.access_sink.flush_interval",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  `+tc.body+`
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}

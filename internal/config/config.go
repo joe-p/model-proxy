@@ -35,9 +35,25 @@ type ServerConfig struct {
 }
 
 type LoggingConfig struct {
-	Format   string
-	Level    slog.Level
-	LogUsage bool
+	Format     string
+	Level      slog.Level
+	LogUsage   bool
+	AccessSink AccessSinkConfig
+}
+
+// AccessSinkConfig configures optional push of access-log records to an HTTP
+// collector. An empty URL disables the sink.
+type AccessSinkConfig struct {
+	URL           string
+	BatchSize     int
+	FlushInterval time.Duration
+	Timeout       time.Duration
+	QueueSize     int
+}
+
+// Enabled reports whether an HTTP access-log sink is configured.
+func (s AccessSinkConfig) Enabled() bool {
+	return s.URL != ""
 }
 
 type AuthConfig struct {

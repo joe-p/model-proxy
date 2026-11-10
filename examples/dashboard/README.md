@@ -1,14 +1,16 @@
 # Usage dashboard example
 
-A small TypeScript collector that turns model-proxy's JSON access log into a
-usage dashboard. It parses the log stream into SQLite, then serves a page with
-cost totals, a subscription-estimate toggle, and a per-model breakdown.
+A small TypeScript collector that turns model-proxy's JSON access records into a
+usage dashboard. It accepts records over HTTP from model-proxy's access sink, or
+from stdout/file for offline replay, stores them in SQLite, then serves a page
+with cost totals, a subscription-estimate toggle, and a per-model breakdown.
 
 It has **no runtime dependencies**. It uses `node:sqlite` (Node 22.13+) and
 `tsx` only to run TypeScript directly.
 
 > This is an example, not a hardened service. It binds to `127.0.0.1` and has no
-> authentication. Put it behind a reverse proxy if you expose it.
+> authentication, including on `POST /ingest`. Put it behind a reverse proxy or
+> keep it on a private Docker network if you expose it.
 
 ## Run it
 
@@ -18,6 +20,38 @@ Install the dev tools once:
 cd examples/dashboard
 npm install
 ```
+
+Run the collector and dashboard:
+
+```sh
+npm start -- --db usage.db
+```
+
+Then point model-proxy at its ingest endpoint:
+
+```jsonc
+"logging": {
+  "format": "json",
+  "level": "info",
+  "log_usage": true,
+  "access_sink": {
+    "url": "http://127.0.0.1:8787/ingest"
+  }
+}
+```
+
+The proxy keeps writing access records to stdout too. Only records with
+`msg: "request"` are pushed. Delivery is asynchronous and best-effort; see the
+project README for `batch_size`, `flush_interval`, `timeout`, and `queue_size`.
+
+In separate Docker services, bind the dashboard to the network interface
+(`--host 0.0.0.0`) and use the service name in the sink URL, for example
+`http://dashboard:8787/ingest`. No host port is required.
+
+Open <http://127.0.0.1:8787>. Do not open `public/index.html` directly: the page
+needs the collector's `/api/usage` endpoint.
+
+### Offline and development modes
 
 Wrap a live proxy (the collector spawns it and reads its stdout):
 
@@ -37,11 +71,19 @@ Read from a pipe:
 ../../bin/model-proxy -config ../../config.json | npm start -- --stdin
 ```
 
-Then open <http://127.0.0.1:8787>. Do not open `public/index.html` directly:
-the page needs the collector's `/api/usage` endpoint.
-
 Options: `--db <path>`, `--port <n>`, `--host <addr>`. Run
 `npm start -- --help` for the list.
+
+## HTTP ingest
+
+`POST /ingest` accepts one batch:
+
+```json
+{"records":[{"time":"2026-01-01T00:00:00Z","level":"INFO","msg":"request","request_id":"abc","status":200}]}
+```
+
+It responds with `202` and `{"accepted":n,"skipped":n}`. A malformed body gets
+`400`; an oversized body gets `413`. Rows are inserted in a single transaction.
 
 ## What it computes
 
@@ -62,22 +104,25 @@ provider. Token counts are the prompt/completion sums from the log.
 ## How it works
 
 ```
-proxy stdout ──▶ readline ──▶ parse.ts ──▶ SQLite ──▶ /api/usage ──▶ dashboard
+stdout ──readline────────────────────┐
+POST /ingest ──{"records":[...]}─────┴──▶ parse.ts ──▶ SQLite ──▶ /api/usage
 ```
 
 - `src/parse.ts` keeps only `msg: "request"` records and drops `/healthz`.
+- `src/server.ts` serves the page, the JSON API, and `POST /ingest`.
 - `src/db.ts` stores rows with `request_id` as the primary key, so replaying a
-  log or restarting the collector does not double-count. Inserts are batched in
-  a transaction.
-- `src/ingest.ts` batches 250 rows or flushes every second.
-- `src/server.ts` serves the page and the JSON API.
+  log, retrying an HTTP batch, or restarting the collector does not double-count.
+- `src/ingest.ts` handles stdout/file modes and batches 250 rows or flushes
+  every second.
 
 The collector's own diagnostics go to stderr so they never contaminate the
 parsed log stream.
 
 ## Notes and limits
 
-- Rows are keyed by `request_id`, so re-ingesting the same file is safe.
+- Rows are keyed by `request_id`, so re-ingesting the same batch is safe.
+- HTTP ingest is unauthenticated. Keep the dashboard on a private network or put
+  auth in front of it.
 - Nothing prunes old rows. For long retention, add a delete job (for example,
   `DELETE FROM usage WHERE ts_ms < ?`) or partition the table by month.
 - The dashboard queries on each request with no cache; fine at personal scale.

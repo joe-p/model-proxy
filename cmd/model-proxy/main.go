@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/logging"
@@ -44,7 +45,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
+	logs, _, err := newLogRuntime(cfg, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		closeSink(logs.sink, cfg.Server.ShutdownTimeout)
+	}()
+	logger := logs.logger
 	providers, err := buildProviders(cfg)
 	if err != nil {
 		return err
@@ -64,6 +72,7 @@ func run() error {
 		"providers", len(cfg.Providers),
 		"policies", len(cfg.Policies),
 		"env_file", cfg.EnvFile,
+		"access_sink", cfg.Logging.AccessSink.Enabled(),
 	)
 
 	errCh := make(chan error, 1)
@@ -79,7 +88,7 @@ func run() error {
 		select {
 		case sig := <-sigCh:
 			if sig == syscall.SIGHUP {
-				newCancel, err := reload(srv, *configPath)
+				newCancel, newLogs, reused, err := reload(srv, *configPath, logs)
 				if err != nil {
 					logger.Error("configuration reload failed", "error", err)
 					continue
@@ -88,6 +97,12 @@ func run() error {
 					pricingCancel()
 				}
 				pricingCancel = newCancel
+				oldLogs := logs
+				logs = newLogs
+				logger = logs.logger
+				if !reused {
+					closeSinkLater(oldLogs.sink, cfg.Server.ShutdownTimeout)
+				}
 				continue
 			}
 
@@ -106,30 +121,93 @@ func run() error {
 	}
 }
 
-func reload(srv *server.Server, path string) (context.CancelFunc, error) {
+func reload(srv *server.Server, path string, current *logRuntime) (context.CancelFunc, *logRuntime, bool, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
 	providers, err := buildProviders(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, false, err
 	}
-	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
-	pricingSvc, pricingCancel := startPricing(cfg, logger)
-	if err := srv.Reload(cfg, providers, logger, costEstimator(pricingSvc)); err != nil {
+	logs, reused, err := newLogRuntime(cfg, current)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	pricingSvc, pricingCancel := startPricing(cfg, logs.logger)
+	if err := srv.Reload(cfg, providers, logs.logger, costEstimator(pricingSvc)); err != nil {
 		if pricingCancel != nil {
 			pricingCancel()
 		}
-		return nil, err
+		if !reused {
+			closeSink(logs.sink, cfg.Server.ShutdownTimeout)
+		}
+		return nil, nil, false, err
 	}
-	logger.Info("configuration reloaded",
+	logs.logger.Info("configuration reloaded",
 		"models", len(cfg.Models),
 		"providers", len(cfg.Providers),
 		"keys", len(cfg.Keys),
 		"policies", len(cfg.Policies),
+		"access_sink", cfg.Logging.AccessSink.Enabled(),
 	)
-	return pricingCancel, nil
+	return pricingCancel, logs, reused, nil
+}
+
+// logRuntime owns the logger and, optionally, the HTTP access-log sink that
+// receives request records in addition to stdout.
+type logRuntime struct {
+	logger  *slog.Logger
+	sink    *logging.HTTPSink
+	sinkCfg config.AccessSinkConfig
+}
+
+// newLogRuntime builds a logger. When the sink settings are unchanged, it
+// reuses the existing sink so a SIGHUP does not interrupt delivery.
+func newLogRuntime(cfg *config.Config, current *logRuntime) (*logRuntime, bool, error) {
+	base := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
+	sinkCfg := cfg.Logging.AccessSink
+
+	if !sinkCfg.Enabled() {
+		return &logRuntime{logger: base}, false, nil
+	}
+	if current != nil && current.sink != nil && current.sinkCfg == sinkCfg {
+		logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout, current.sink)
+		return &logRuntime{logger: logger, sink: current.sink, sinkCfg: sinkCfg}, true, nil
+	}
+
+	sink, err := logging.NewHTTPSink(logging.HTTPSinkOptions{
+		URL:           sinkCfg.URL,
+		BatchSize:     sinkCfg.BatchSize,
+		FlushInterval: sinkCfg.FlushInterval,
+		Timeout:       sinkCfg.Timeout,
+		QueueSize:     sinkCfg.QueueSize,
+		Logger:        base,
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout, sink)
+	return &logRuntime{logger: logger, sink: sink, sinkCfg: sinkCfg}, false, nil
+}
+
+func closeSink(sink *logging.HTTPSink, timeout time.Duration) {
+	if sink == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	_ = sink.Close(ctx)
+}
+
+func closeSinkLater(sink *logging.HTTPSink, delay time.Duration) {
+	if sink == nil {
+		return
+	}
+	go func() {
+		time.Sleep(delay)
+		closeSink(sink, delay)
+	}()
 }
 
 // costEstimator wraps a possibly nil *pricing.Service so that callers receive a

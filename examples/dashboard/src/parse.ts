@@ -48,18 +48,11 @@ function bool(value: unknown): boolean {
   return value === true;
 }
 
-// parseLine turns one line of stdout into an AccessLog, or returns null for
-// anything that is not an access record (startup logs, errors, health checks).
-export function parseLine(line: string): AccessLog | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('{')) return null;
-
-  let raw: Raw;
-  try {
-    raw = JSON.parse(trimmed) as Raw;
-  } catch {
-    return null;
-  }
+// parseRecord validates one decoded JSON object. It returns null for anything
+// that is not an access record (startup logs, errors, health checks).
+export function parseRecord(value: unknown): AccessLog | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Raw;
 
   if (raw.msg !== 'request') return null;
 
@@ -100,4 +93,19 @@ export function parseLine(line: string): AccessLog | null {
     estimatedApiCostUsd: num(raw.estimated_api_cost_usd),
     pricingSource: str(raw.pricing_source),
   };
+}
+
+// parseLine turns one line of stdout into an AccessLog, or returns null for
+// anything that is not an access record.
+export function parseLine(line: string): AccessLog | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith('{')) return null;
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  return parseRecord(raw);
 }

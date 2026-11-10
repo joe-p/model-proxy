@@ -67,6 +67,10 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 	if raw.Logging.LogUsage != nil {
 		cfg.Logging.LogUsage = *raw.Logging.LogUsage
 	}
+	cfg.Logging.AccessSink, err = resolveAccessSink(raw.Logging.AccessSink)
+	if err != nil {
+		return nil, err
+	}
 
 	// Auth defaults to enabled.
 	cfg.Auth.Enabled = true
@@ -343,6 +347,62 @@ func parseDuration(value *string, fallback time.Duration, field string) (time.Du
 		return 0, fmt.Errorf("%s must be positive", field)
 	}
 	return d, nil
+}
+
+const (
+	defaultSinkBatchSize     = 250
+	defaultSinkFlushInterval = time.Second
+	defaultSinkTimeout       = 5 * time.Second
+	defaultSinkQueueSize     = 4096
+)
+
+func resolveAccessSink(raw *rawAccessSink) (AccessSinkConfig, error) {
+	if raw == nil {
+		return AccessSinkConfig{}, nil
+	}
+	var cfg AccessSinkConfig
+	if raw.URL == nil || strings.TrimSpace(*raw.URL) == "" {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.url must not be empty")
+	}
+	endpoint := strings.TrimSpace(*raw.URL)
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.url must use http or https")
+	}
+	if u.Host == "" {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.url must include a host")
+	}
+	if u.Fragment != "" {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.url must not include a fragment")
+	}
+	cfg.URL = endpoint
+
+	cfg.BatchSize = defaultSinkBatchSize
+	if raw.BatchSize != nil {
+		cfg.BatchSize = *raw.BatchSize
+	}
+	if cfg.BatchSize <= 0 {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.batch_size must be positive")
+	}
+	cfg.QueueSize = defaultSinkQueueSize
+	if raw.QueueSize != nil {
+		cfg.QueueSize = *raw.QueueSize
+	}
+	if cfg.QueueSize <= 0 {
+		return AccessSinkConfig{}, fmt.Errorf("logging.access_sink.queue_size must be positive")
+	}
+	cfg.FlushInterval, err = parseDuration(raw.FlushInterval, defaultSinkFlushInterval, "logging.access_sink.flush_interval")
+	if err != nil {
+		return AccessSinkConfig{}, err
+	}
+	cfg.Timeout, err = parseDuration(raw.Timeout, defaultSinkTimeout, "logging.access_sink.timeout")
+	if err != nil {
+		return AccessSinkConfig{}, err
+	}
+	return cfg, nil
 }
 
 func isCodexProvider(providerType string) bool {

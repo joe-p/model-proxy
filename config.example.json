@@ -17,7 +17,18 @@
   "logging": {
     "format": "json", // json | text
     "level": "info", // debug | info | warn | error
-    "log_usage": true
+    "log_usage": true,
+
+    // Optional: push access records to an HTTP collector in addition to stdout.
+    // The collector receives {"records":[...]} and should return any 2xx.
+    // Delivery is asynchronous and best-effort; stdout is always enabled.
+    // "access_sink": {
+    //   "url": "http://dashboard:8787/ingest",
+    //   "batch_size": 250,
+    //   "flush_interval": "1s",
+    //   "timeout": "5s",
+    //   "queue_size": 4096
+    // }
   },
 
   "auth": {

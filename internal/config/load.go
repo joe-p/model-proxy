@@ -32,9 +32,18 @@ type rawServer struct {
 }
 
 type rawLogging struct {
-	Format   *string `json:"format"`
-	Level    *string `json:"level"`
-	LogUsage *bool   `json:"log_usage"`
+	Format     *string        `json:"format"`
+	Level      *string        `json:"level"`
+	LogUsage   *bool          `json:"log_usage"`
+	AccessSink *rawAccessSink `json:"access_sink"`
+}
+
+type rawAccessSink struct {
+	URL           *string `json:"url"`
+	BatchSize     *int    `json:"batch_size"`
+	FlushInterval *string `json:"flush_interval"`
+	Timeout       *string `json:"timeout"`
+	QueueSize     *int    `json:"queue_size"`
 }
 
 type rawAuth struct {
