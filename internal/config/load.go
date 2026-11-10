@@ -53,6 +53,7 @@ type rawPolicy struct {
 }
 
 type rawProvider struct {
+	Type                  string         `json:"type"`
 	BaseURL               string         `json:"base_url"`
 	APIKeyEnv             string         `json:"api_key_env"`
 	DialTimeout           *string        `json:"dial_timeout"`

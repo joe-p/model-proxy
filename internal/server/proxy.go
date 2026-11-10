@@ -1,11 +1,12 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/joe-p/model-proxy/internal/openroutercompat"
 )
 
 type requestLog struct {
@@ -85,24 +86,35 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-// copyJSON forwards the body unchanged while optionally observing top-level
-// usage metadata after the copy completes.
-func copyJSON(dst io.Writer, src io.Reader, parseUsage bool) (*usage, error) {
-	if !parseUsage {
+// copyJSON forwards the body, optionally normalizing usage metadata to the
+// OpenRouter shape and observing it after the copy completes.
+func copyJSON(dst io.Writer, src io.Reader, parseUsage, normalize bool) (*usage, error) {
+	if !parseUsage && !normalize {
 		_, err := io.Copy(dst, src)
 		return nil, err
 	}
 
-	var captured bytes.Buffer
-	_, err := io.Copy(dst, io.TeeReader(src, &captured))
+	body, err := io.ReadAll(src)
 	if err != nil {
 		return nil, err
+	}
+	if normalize {
+		normalized, changed, normalizeErr := openroutercompat.NormalizeChatCompletion(body)
+		if normalizeErr == nil && changed {
+			body = normalized
+		}
+	}
+	if _, err := dst.Write(body); err != nil {
+		return nil, err
+	}
+	if !parseUsage {
+		return nil, nil
 	}
 
 	var envelope struct {
 		Usage *usage `json:"usage"`
 	}
-	if err := json.Unmarshal(captured.Bytes(), &envelope); err != nil {
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, nil
 	}
 	return envelope.Usage, nil

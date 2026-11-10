@@ -1,9 +1,10 @@
 # model-proxy
 
-A small, configuration-driven, OpenAI-compatible proxy for OpenRouter. It is
+A small, configuration-driven, OpenAI-compatible proxy for OpenRouter and
+[Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway). It is
 deliberately not LiteLLM: no UI, database, caching, rate limiting, budgets, or
-multi-provider translation layer. One Go binary, one JSON file, one upstream
-provider.
+multi-provider translation layer. One Go binary, one JSON file, and routes to
+one or more upstream providers.
 
 ## Features
 
@@ -16,9 +17,11 @@ provider.
 - Optional per-key access-log `user_agent` overrides.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
-- Provider-agnostic interface; the only implementation is OpenRouter.
+- Provider-agnostic interface with OpenRouter and Private AI Gateway
+  implementations.
 - Transparent upstream response bodies and SSE streams.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
+- OpenRouter-compatible usage normalization for non-OpenRouter providers.
 - Token and cost extraction from responses for structured access logs.
 - Atomic `SIGHUP` reload.
 
@@ -69,8 +72,8 @@ curl http://127.0.0.1:8080/v1/models \
 See [`config.example.json`](./config.example.json) for a complete example. The
 config is JWCC (JSON with Commas and Comments): `//` line comments, `/* */`
 block comments, and trailing commas are accepted. The example shows both policy
-modes, a key without a policy, provider/model `extra_body`, and optional
-OpenRouter attribution headers.
+modes, a key without a policy, provider/model `extra_body`, optional OpenRouter
+attribution headers, and a Private AI Gateway provider with ACI constraints.
 
 ```jsonc
 // model-proxy configuration.
@@ -136,8 +139,12 @@ OpenRouter attribution headers.
     },
   ],
 
+  // Provider keys are local names. "type" selects the implementation and may
+  // be omitted when it matches the provider name. Supported types are
+  // "openrouter", "private-ai-gateway", and its "phala" alias.
   "providers": {
     "openrouter": {
+      "type": "openrouter",
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "dial_timeout": "10s",
@@ -153,6 +160,23 @@ OpenRouter attribution headers.
         "provider": {
           "zdr": true,
           "data_collection": "deny",
+        },
+      },
+    },
+    "phala": {
+      "type": "private-ai-gateway",
+      "base_url": "https://inference.phala.com/v1",
+      "api_key_env": "PHALA_API_KEY",
+      "dial_timeout": "10s",
+      "response_header_timeout": "120s",
+
+      // Private AI Gateway reads ACI routing constraints from the request
+      // body. aci_verified makes the gateway fail closed unless the selected
+      // upstream passed attestation verification.
+      "extra_body": {
+        "provider": {
+          "aci_verified": true,
+          "zdr": true,
         },
       },
     },
@@ -176,6 +200,10 @@ OpenRouter attribution headers.
     "smart": {
       "provider": "openrouter",
       "upstream": "anthropic/claude-sonnet-4",
+    },
+    "private": {
+      "provider": "phala",
+      "upstream": "z-ai/glm-5.3",
     },
   },
 }
@@ -203,10 +231,44 @@ Rules:
 - `server.listen` and `read_header_timeout` changes require a restart; other
   values can be reloaded with `SIGHUP`.
 
+### Providers
+
+Each key under `providers` is a local name referenced by models. The optional
+`type` field selects the implementation; when omitted, the provider name is
+used. Supported types are:
+
+- `openrouter`: OpenAI-compatible transport with optional `referer` and `title`
+  attribution headers.
+- `private-ai-gateway` (alias `phala`): OpenAI-compatible transport for
+  [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway). The
+  Phala-hosted deployment is available at `https://inference.phala.com/v1`. A
+  provider named `phala` or `private-ai-gateway` without a `type` uses this
+  implementation.
+
+`base_url` is the provider's API root and must include its version prefix. The
+proxy appends `/chat/completions`, so `https://inference.phala.com/v1` becomes
+`https://inference.phala.com/v1/chat/completions`. A self-hosted gateway works
+the same way; use its listener plus `/v1`, for example
+`http://gateway:8086/v1`.
+
+Private AI Gateway's ACI routing constraints are ordinary request-body fields.
+Set them through `extra_body`, for example:
+
+```json
+{"provider": {"aci_verified": true, "zdr": true}}
+```
+
+`aci_verified` makes the gateway fail closed unless it verified the selected
+upstream inside the TEE. `aci_session_ids` can be added on a model to pin
+specific attested sessions. These fields are removed by the gateway before the
+request reaches the model provider. Responses and verification headers such as
+`X-Receipt-Id`, `X-ACI-Identity`, and `X-ACI-Keyset-Digest` pass through
+unchanged.
+
 ### Model aliases
 
 Clients send the alias in `model`. The proxy rewrites only that field to the
-configured `upstream` before calling OpenRouter. Alias names are exact and
+configured `upstream` before calling the provider. Alias names are exact and
 case-sensitive. Unlisted names return `404 model_not_found`.
 
 A key with a `whitelist` policy may use only the listed aliases. A key with a
@@ -257,16 +319,17 @@ unrelated client fields remain intact. For example, a client cannot turn off
 `zdr` or set `data_collection` to `allow` when the config denies it. To enforce
 a completely fixed object, set every key you care about in the config.
 
-These are OpenRouter request-body fields, not HTTP headers; OpenRouter reads
-`provider.zdr` and `provider.data_collection` from the body. `model`,
+These are request-body fields, not HTTP headers. OpenRouter reads
+`provider.zdr` and `provider.data_collection`; Private AI Gateway reads
+`provider.aci_verified`, `provider.aci_session_ids`, and `provider.zdr`. `model`,
 `messages`, `stream`, `models`, `route`, and `plugins` may not be set in
 `extra_body`; config load fails if they appear.
 
 ## Behavior
 
 - Success bodies and SSE streams are forwarded byte-for-byte.
-- The proxy does not inject `usage: {include: true}`; OpenRouter includes usage
-  and cost in responses by default.
+- The proxy does not inject usage options; providers include usage in
+  responses according to their own defaults.
 - `X-Model-Proxy-Alias` and `X-Model-Proxy-Upstream` describe the selected
   route. `X-Request-ID` is accepted from the client if valid, otherwise
   generated, forwarded upstream, echoed to the client, and included in logs.
@@ -278,6 +341,31 @@ These are OpenRouter request-body fields, not HTTP headers; OpenRouter reads
 - Automatic transport compression is disabled so response bytes are never
   silently decompressed.
 - There is no CORS support and no upstream model-catalog call.
+
+### OpenRouter-compatible usage output
+
+OpenRouter-capable clients expect OpenRouter's usage shape. For providers whose
+type is not `openrouter`, model-proxy normalizes the `usage` object in both
+buffered and streaming responses:
+
+| OpenRouter field | Source when the provider uses another dialect |
+| --- | --- |
+| `prompt_tokens_details.cached_tokens` | `cache_read_input_tokens` or `prompt_cache_hit_tokens` |
+| `prompt_tokens_details.cache_write_tokens` | `cache_creation_input_tokens` |
+| `completion_tokens_details.reasoning_tokens` | top-level `reasoning_tokens` |
+| `total_tokens` | `prompt_tokens + completion_tokens` when omitted |
+
+Existing values are never overridden. model-proxy does not invent `cost`,
+`cost_details`, `cache_discount`, or cache counters that the provider did not
+report. Private AI Gateway already reports `cost`, standard token counters, and
+`cached_tokens`, so those pass through.
+
+For streaming requests to non-OpenRouter providers, model-proxy also sets
+`stream_options.include_usage` to `true` unless already true. OpenRouter always
+includes terminal usage, and this gives OpenRouter-compatible clients the same
+behavior from other providers.
+
+OpenRouter responses are not normalized and remain byte-for-byte transparent.
 
 ### Proxy-generated errors
 
@@ -307,7 +395,8 @@ When `logging.log_usage` is enabled, the proxy observes the response body
 without changing it and adds `prompt_tokens`, `completion_tokens`,
 `total_tokens`, and, when the upstream reports them, `cost_usd`,
 `cache_discount`, `cached_tokens`, and `cache_write_tokens`. `cost_usd` is
-OpenRouter's `usage.cost` (credits, 1:1 with USD); `cached_tokens` and
+the upstream's `usage.cost` (for OpenRouter, credits, 1:1 with USD);
+`cached_tokens` and
 `cache_write_tokens` come from `usage.prompt_tokens_details` and are logged as
 reported, including `0` for a cache miss. Fields the upstream omits are not
 logged at all.
@@ -354,5 +443,5 @@ Default tests use a fake upstream `httptest.Server` and make no network calls.
 ## Non-goals for v1
 
 No UI, database, response cache, rate limiting, key-management API, budgets,
-Prometheus endpoint, fallbacks/retries, additional providers, response model
+Prometheus endpoint, fallbacks/retries, additional provider families, response model
 rewriting, CORS, or live model-catalog fetching.

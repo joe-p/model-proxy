@@ -16,8 +16,8 @@ type Request struct {
 	Query         string
 }
 
-// Provider is the boundary between the proxy and an upstream API. Only
-// OpenRouter is implemented today.
+// Provider is the boundary between the proxy and an upstream API.
+// Implementations live under internal/provider.
 type Provider interface {
 	Name() string
 	ChatCompletions(ctx context.Context, req Request) (*http.Response, error)

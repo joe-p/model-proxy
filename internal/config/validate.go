@@ -145,8 +145,15 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		if err != nil {
 			return nil, err
 		}
+		providerType := strings.TrimSpace(rawProvider.Type)
+		if providerType == "" {
+			// Backwards compatibility: a provider without an explicit type is
+			// identified by its configured name.
+			providerType = name
+		}
 		cfg.Providers[name] = ProviderConfig{
 			Name:                  name,
+			Type:                  providerType,
 			BaseURL:               baseURL,
 			APIKey:                apiKey,
 			DialTimeout:           dialTimeout,

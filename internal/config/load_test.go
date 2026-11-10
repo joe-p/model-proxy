@@ -102,6 +102,44 @@ func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesProviderTypes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    },
+    "phala": {
+      "type": "private-ai-gateway",
+      "base_url": "https://inference.phala.com/v1",
+      "api_key_env": "PHALA_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"},
+    "private": {"provider": "phala", "upstream": "z-ai/glm-5.3"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+	t.Setenv("PHALA_KEY", "phala-upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["openrouter"].Type; got != "openrouter" {
+		t.Fatalf("default provider type = %q, want name", got)
+	}
+	if got := cfg.Providers["phala"].Type; got != "private-ai-gateway" {
+		t.Fatalf("explicit provider type = %q", got)
+	}
+}
+
 func TestLoadAcceptsCommentsAndTrailingCommas(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config.json", `{

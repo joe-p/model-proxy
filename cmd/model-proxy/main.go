@@ -12,6 +12,7 @@ import (
 	"github.com/joe-p/model-proxy/internal/logging"
 	"github.com/joe-p/model-proxy/internal/provider"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
+	"github.com/joe-p/model-proxy/internal/provider/privateaigateway"
 	"github.com/joe-p/model-proxy/internal/server"
 )
 
@@ -115,7 +116,7 @@ func reload(srv *server.Server, path string) error {
 func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 	result := make(map[string]provider.Provider, len(cfg.Providers))
 	for name, providerCfg := range cfg.Providers {
-		switch name {
+		switch providerCfg.Type {
 		case "openrouter":
 			p, err := openrouter.New(
 				providerCfg.Name,
@@ -130,8 +131,20 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				return nil, fmt.Errorf("provider %q: %w", name, err)
 			}
 			result[name] = p
+		case "private-ai-gateway", "phala":
+			p, err := privateaigateway.New(
+				providerCfg.Name,
+				providerCfg.BaseURL,
+				providerCfg.APIKey,
+				providerCfg.DialTimeout,
+				providerCfg.ResponseHeaderTimeout,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q: %w", name, err)
+			}
+			result[name] = p
 		default:
-			return nil, fmt.Errorf("provider %q is not supported", name)
+			return nil, fmt.Errorf("provider %q has unsupported type %q", name, providerCfg.Type)
 		}
 	}
 

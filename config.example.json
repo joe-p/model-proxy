@@ -61,8 +61,12 @@
     }
   ],
 
+  // Provider keys are local names. "type" selects the implementation and may
+  // be omitted when it matches the provider name. Supported types are
+  // "openrouter", "private-ai-gateway", and its "phala" alias.
   "providers": {
     "openrouter": {
+      "type": "openrouter",
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "dial_timeout": "10s",
@@ -78,6 +82,23 @@
         "provider": {
           "zdr": true,
           "data_collection": "deny"
+        }
+      }
+    },
+    "phala": {
+      "type": "private-ai-gateway",
+      "base_url": "http://localhost:4180/v1",
+      "api_key_env": "PHALA_API_KEY",
+      "dial_timeout": "10s",
+      "response_header_timeout": "120s",
+
+      // Private AI Gateway reads ACI routing constraints from the request
+      // body. aci_verified makes the gateway fail closed unless the selected
+      // upstream passed attestation verification.
+      "extra_body": {
+        "provider": {
+          "aci_verified": true,
+          "zdr": true
         }
       }
     }
@@ -101,6 +122,10 @@
     "smart": {
       "provider": "openrouter",
       "upstream": "anthropic/claude-sonnet-4"
+    },
+    "private": {
+      "provider": "phala",
+      "upstream": "z-ai/glm-5.3"
     }
   }
 }

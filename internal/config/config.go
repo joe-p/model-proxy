@@ -78,6 +78,7 @@ func (c *Config) ModelAllowed(key *VirtualKey, alias string) bool {
 
 type ProviderConfig struct {
 	Name                  string
+	Type                  string
 	BaseURL               string
 	APIKey                string
 	DialTimeout           time.Duration

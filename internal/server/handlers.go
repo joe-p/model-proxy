@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -159,6 +160,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	providerType := cfg.Providers[model.Provider].Type
+	if providerType == "" {
+		providerType = model.Provider
+	}
+	// OpenRouter always reports usage, including for streams. Ask
+	// OpenAI-compatible providers for the same terminal usage chunk.
+	normalize := providerType != "openrouter"
+	if stream && normalize {
+		ensureStreamUsage(fields)
+	}
+
 	// The alias rewrite always wins, even for hand-built configs that bypass
 	// load-time validation of reserved extra_body fields.
 	upstreamModel, err := json.Marshal(model.Upstream)
@@ -225,9 +237,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	var copyErr error
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		lr.usage, copyErr = copySSE(w, resp.Body, cfg.Logging.LogUsage)
+		lr.usage, copyErr = copySSE(w, resp.Body, cfg.Logging.LogUsage, normalize)
 	} else {
-		lr.usage, copyErr = copyJSON(w, resp.Body, cfg.Logging.LogUsage)
+		lr.usage, copyErr = copyJSON(w, resp.Body, cfg.Logging.LogUsage, normalize)
 	}
 	if copyErr != nil && r.Context().Err() == nil {
 		lr.errorDetail = copyErr.Error()
@@ -265,6 +277,28 @@ func logKey(lr *requestLog, cfg *config.Config, key *config.VirtualKey) {
 		lr.policyModels = append(lr.policyModels, alias)
 	}
 	sort.Strings(lr.policyModels)
+}
+
+// ensureStreamUsage asks an OpenAI-compatible upstream to include the
+// terminal usage chunk. OpenRouter always includes it; matching that behavior
+// keeps OpenRouter-compatible clients and access logs consistent.
+func ensureStreamUsage(fields map[string]json.RawMessage) {
+	raw, exists := fields["stream_options"]
+	trimmed := bytes.TrimSpace(raw)
+	if !exists || len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		fields["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+		return
+	}
+
+	var options map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &options); err != nil || options == nil {
+		return
+	}
+	options["include_usage"] = json.RawMessage(`true`)
+	encoded, err := json.Marshal(options)
+	if err == nil {
+		fields["stream_options"] = encoded
+	}
 }
 
 func readRequestBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {

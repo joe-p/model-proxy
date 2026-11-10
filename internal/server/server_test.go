@@ -16,6 +16,7 @@ import (
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/provider"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
+	"github.com/joe-p/model-proxy/internal/provider/privateaigateway"
 	"github.com/joe-p/model-proxy/internal/server"
 )
 
@@ -38,7 +39,16 @@ func (b *lockedBuffer) String() string {
 
 func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) (*httptest.Server, *lockedBuffer) {
 	t.Helper()
+	return newTestProxyWithProvider(t, upstreamURL, "openrouter", tweak)
+}
 
+func newTestProxyWithProvider(t *testing.T, upstreamURL, providerType string, tweak func(*config.Config)) (*httptest.Server, *lockedBuffer) {
+	t.Helper()
+
+	providerName := "openrouter"
+	if providerType != "openrouter" {
+		providerName = "phala"
+	}
 	cfg := &config.Config{
 		Server: config.ServerConfig{
 			Listen:            "127.0.0.1:0",
@@ -50,8 +60,9 @@ func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) 
 		Auth:    config.AuthConfig{Enabled: true},
 		Keys:    []config.VirtualKey{{Name: "test", Key: "test-key"}},
 		Providers: map[string]config.ProviderConfig{
-			"openrouter": {
-				Name:                  "openrouter",
+			providerName: {
+				Name:                  providerName,
+				Type:                  providerType,
 				BaseURL:               upstreamURL,
 				APIKey:                "upstream-key",
 				DialTimeout:           time.Second,
@@ -61,8 +72,8 @@ func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) 
 			},
 		},
 		Models: map[string]config.ModelConfig{
-			"fast":  {Alias: "fast", Provider: "openrouter", Upstream: "openai/gpt-4o-mini"},
-			"smart": {Alias: "smart", Provider: "openrouter", Upstream: "anthropic/claude-sonnet-4"},
+			"fast":  {Alias: "fast", Provider: providerName, Upstream: "openai/gpt-4o-mini"},
+			"smart": {Alias: "smart", Provider: providerName, Upstream: "anthropic/claude-sonnet-4"},
 		},
 	}
 	if tweak != nil {
@@ -71,21 +82,36 @@ func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) 
 
 	logBuf := &lockedBuffer{}
 	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	providerCfg := cfg.Providers["openrouter"]
-	p, err := openrouter.New(
-		providerCfg.Name,
-		providerCfg.BaseURL,
-		providerCfg.APIKey,
-		providerCfg.DialTimeout,
-		providerCfg.ResponseHeaderTimeout,
-		providerCfg.Referer,
-		providerCfg.Title,
-	)
+	providerCfg := cfg.Providers[providerName]
+	var p provider.Provider
+	var err error
+	switch providerType {
+	case "openrouter":
+		p, err = openrouter.New(
+			providerCfg.Name,
+			providerCfg.BaseURL,
+			providerCfg.APIKey,
+			providerCfg.DialTimeout,
+			providerCfg.ResponseHeaderTimeout,
+			providerCfg.Referer,
+			providerCfg.Title,
+		)
+	case "private-ai-gateway":
+		p, err = privateaigateway.New(
+			providerCfg.Name,
+			providerCfg.BaseURL,
+			providerCfg.APIKey,
+			providerCfg.DialTimeout,
+			providerCfg.ResponseHeaderTimeout,
+		)
+	default:
+		t.Fatalf("unsupported test provider type %q", providerType)
+	}
 	if err != nil {
-		t.Fatalf("openrouter.New: %v", err)
+		t.Fatalf("build provider: %v", err)
 	}
 
-	srv := server.New(cfg, map[string]provider.Provider{"openrouter": p}, logger)
+	srv := server.New(cfg, map[string]provider.Provider{providerName: p}, logger)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, logBuf
@@ -377,6 +403,15 @@ func TestChatStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
 		"data: [DONE]\n\n"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		if _, ok := fields["stream_options"]; ok {
+			t.Errorf("OpenRouter should not receive injected stream_options")
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
@@ -407,6 +442,115 @@ func TestChatStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
 	waitForLog(t, logs, `"cached_tokens":2`)
 	waitForLog(t, logs, `"cache_write_tokens":0`)
 	waitForLog(t, logs, `"stream":true`)
+}
+
+func TestPrivateAIGatewayNormalizesUsageToOpenRouter(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","object":"chat.completion","usage":{"prompt_tokens":10,"completion_tokens":5,"cache_read_input_tokens":4,"cache_creation_input_tokens":2,"reasoning_tokens":3},"choices":[]}`
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		if _, ok := fields["stream_options"]; ok {
+			t.Errorf("stream_options should not be added to a non-streaming request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "private-ai-gateway", nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":false}`)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("upstream calls = %d", upstreamCalls.Load())
+	}
+
+	var envelope struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var total int64
+	if err := json.Unmarshal(envelope.Usage["total_tokens"], &total); err != nil || total != 15 {
+		t.Fatalf("total_tokens = %d, err = %v", total, err)
+	}
+	var details struct {
+		CachedTokens     *int64 `json:"cached_tokens"`
+		CacheWriteTokens *int64 `json:"cache_write_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage["prompt_tokens_details"], &details); err != nil {
+		t.Fatalf("decode prompt_tokens_details: %v", err)
+	}
+	if details.CachedTokens == nil || *details.CachedTokens != 4 {
+		t.Fatalf("cached_tokens = %v", details.CachedTokens)
+	}
+	if details.CacheWriteTokens == nil || *details.CacheWriteTokens != 2 {
+		t.Fatalf("cache_write_tokens = %v", details.CacheWriteTokens)
+	}
+	var completionDetails struct {
+		ReasoningTokens *int64 `json:"reasoning_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage["completion_tokens_details"], &completionDetails); err != nil {
+		t.Fatalf("decode completion_tokens_details: %v", err)
+	}
+	if completionDetails.ReasoningTokens == nil || *completionDetails.ReasoningTokens != 3 {
+		t.Fatalf("reasoning_tokens = %v", completionDetails.ReasoningTokens)
+	}
+
+	waitForLog(t, logs, `"total_tokens":15`)
+	waitForLog(t, logs, `"cached_tokens":4`)
+	waitForLog(t, logs, `"cache_write_tokens":2`)
+}
+
+func TestPrivateAIGatewayRequestsAndNormalizesStreamingUsage(t *testing.T) {
+	const streamBody = "data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"cache_read_input_tokens\":2}}\n\n" +
+		"data: [DONE]\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var fields struct {
+			StreamOptions map[string]json.RawMessage `json:"stream_options"`
+		}
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		var includeUsage bool
+		if err := json.Unmarshal(fields.StreamOptions["include_usage"], &includeUsage); err != nil || !includeUsage {
+			t.Errorf("include_usage = %v, err = %v", includeUsage, err)
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "private-ai-gateway", nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":true,"stream_options":{"include_usage":false}}`)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"cached_tokens":2`) {
+		t.Fatalf("stream was not normalized: %s", body)
+	}
+	if !strings.Contains(string(body), `"total_tokens":3`) {
+		t.Fatalf("stream usage total was not normalized: %s", body)
+	}
+	waitForLog(t, logs, `"cached_tokens":2`)
+	waitForLog(t, logs, `"total_tokens":3`)
 }
 
 func TestUpstreamTimeoutReturns504(t *testing.T) {
