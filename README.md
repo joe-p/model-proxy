@@ -291,8 +291,9 @@ used. Supported types are:
   Completions API, including Private AI Gateway, vLLM, and similar servers.
   `openai`, `phala`, and `private-ai-gateway` are accepted aliases for this
   type.
-- `codex` (alias `chatgpt`): OpenAI-compatible transport authenticated with
-  OpenAI Codex CLI OAuth credentials. See [Codex auth](#codex-auth).
+- `codex` (alias `chatgpt`): Responses API transport authenticated with OpenAI
+  Codex CLI OAuth credentials. Chat Completions requests are bridged to the
+  Responses API. See [Codex auth](#codex-auth).
 
 Private AI Gateway is not a separate implementation. Configure it as an
 `openai-compatible` provider. The Phala-hosted deployment is available at
@@ -347,12 +348,19 @@ Use one proxy process per `auth.json`. Refresh tokens are single-use, so
 separate processes sharing a file can race and invalidate each other's
 credentials.
 
-The Codex backend's native API is the Responses API. Use
-`POST /v1/responses` for Codex clients; the proxy forwards the request and SSE
-stream unchanged and observes usage only for its access log. The `codex`
-provider still exposes the proxy's Chat Completions transport
-(`POST <base_url>/chat/completions`) for chat-compatible bridges, but the real
-Codex backend does not serve that endpoint.
+The Codex backend's native API is the Responses API. `POST /v1/responses`
+forwards requests and SSE streams unchanged and observes usage only for its
+access log.
+
+`POST /v1/chat/completions` is bridged for `codex` providers. The proxy
+converts Chat Completions messages, tools, tool calls, and response formats
+into a Responses request, always streams from the Codex backend (which rejects
+non-streaming Responses requests), and converts the resulting events back into
+Chat Completions JSON or SSE. Because the ChatGPT backend rejects most sampling
+and attribution parameters, fields such as `temperature`, `top_p`, `stop`,
+`seed`, `n`, penalties, and `user` are dropped for Codex requests. The access
+log still records tokens and, with a pricing catalog, an
+`estimated_api_cost_usd` API-equivalent estimate.
 
 A `codex` provider defaults to `"billing_mode": "subscription"`. Override it
 with `billing_mode` if the same provider shape points at an API-billed service.
@@ -466,7 +474,8 @@ These are request-body fields, not HTTP headers. OpenRouter reads
 ## Behavior
 
 - Success bodies and SSE streams are forwarded byte-for-byte, except for the
-  chat-completions usage normalization described below.
+  chat-completions usage normalization described below and the Codex Chat
+  Completions bridge, which translates between the two dialects.
 - Responses API bodies and streams are never normalized. Chat streaming
   requests to non-OpenRouter providers set `stream_options.include_usage` as
   described below.
@@ -563,7 +572,8 @@ upstream status, headers, and body unchanged. The model alias is rewritten,
 configured `extra_body` is merged, and virtual-key authentication and policies
 apply exactly as for chat completions. The proxy does not normalize Responses
 bodies and does not inject `stream_options`, so Responses-native clients keep
-their own usage accounting.
+their own usage accounting. A `codex` provider also uses this path internally
+when a client calls `/v1/chat/completions`.
 
 When `logging.log_usage` is enabled, the proxy observes usage for its access
 log from `response.completed` and `response.incomplete` events, or from the

@@ -119,6 +119,8 @@
     // auth_dir, $CODEX_HOME or ~/.codex is used. api_key_env is optional; when
     // set it is used as a static bearer token instead of the auth file.
     // billing_mode defaults to "subscription" for codex providers.
+    // Chat Completions requests are bridged to the Responses API, which is the
+    // only API the ChatGPT backend serves.
     //
     // "passthrough_models" accepts model ids that are not listed under
     // "models": the requested id is forwarded upstream unchanged, and

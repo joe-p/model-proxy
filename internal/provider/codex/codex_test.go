@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,13 +52,13 @@ func writeAuthFile(t *testing.T, dir, accessToken string) {
 	}
 }
 
-func TestProviderUsesCodexAuthFile(t *testing.T) {
+func TestProviderBridgesChatCompletionsToResponses(t *testing.T) {
 	dir := t.TempDir()
 	accessToken := makeJWT(t, time.Now().Add(time.Hour), "account-123")
 	writeAuthFile(t, dir, accessToken)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Path; got != "/backend-api/codex/chat/completions" {
+		if got := r.URL.Path; got != "/backend-api/codex/responses" {
 			t.Errorf("path = %q", got)
 		}
 		if got := r.Header.Get("Authorization"); got != "Bearer "+accessToken {
@@ -68,8 +70,36 @@ func TestProviderUsesCodexAuthFile(t *testing.T) {
 		if got := r.Header.Get("originator"); got != codex.DefaultOriginator {
 			t.Errorf("originator = %q", got)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
+		if got := r.Header.Get("OpenAI-Beta"); got != "responses=experimental" {
+			t.Errorf("openai-beta = %q", got)
+		}
+		if got := r.Header.Get("Accept"); got != "text/event-stream" {
+			t.Errorf("accept = %q", got)
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Fatalf("request body: %v", err)
+		}
+		if string(fields["model"]) != `"gpt-5"` {
+			t.Errorf("model = %s", fields["model"])
+		}
+		if string(fields["stream"]) != "true" {
+			t.Errorf("stream = %s", fields["stream"])
+		}
+		if string(fields["store"]) != "false" {
+			t.Errorf("store = %s", fields["store"])
+		}
+		if !strings.Contains(string(fields["input"]), `"text":"hi"`) {
+			t.Errorf("input = %s", fields["input"])
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","object":"response","created_at":1700000000,"status":"completed","model":"gpt-5","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}
+
+`))
 	}))
 	defer upstream.Close()
 
@@ -78,7 +108,8 @@ func TestProviderUsesCodexAuthFile(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	resp, err := p.ChatCompletions(context.Background(), provider.Request{
-		Body: []byte(`{"model":"gpt-5","messages":[]}`),
+		UpstreamModel: "gpt-5",
+		Body:          []byte(`{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`),
 	})
 	if err != nil {
 		t.Fatalf("ChatCompletions: %v", err)
@@ -86,6 +117,33 @@ func TestProviderUsesCodexAuthFile(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Errorf("content type = %q", got)
+	}
+
+	var completion struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens int64 `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&completion); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if completion.Object != "chat.completion" {
+		t.Errorf("object = %q", completion.Object)
+	}
+	if len(completion.Choices) != 1 || completion.Choices[0].Message.Content != "hello" {
+		t.Errorf("choices = %+v", completion.Choices)
+	}
+	if completion.Usage.PromptTokens != 3 {
+		t.Errorf("prompt tokens = %d", completion.Usage.PromptTokens)
 	}
 }
 
@@ -126,14 +184,17 @@ func TestProviderResponsesUsesCodexResponsesPath(t *testing.T) {
 func TestProviderStaticAPIKeyTakesPrecedence(t *testing.T) {
 	staticKey := makeJWT(t, time.Now().Add(time.Hour), "static-account")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/responses" {
+			t.Errorf("path = %q", got)
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer "+staticKey {
 			t.Errorf("authorization = %q", got)
 		}
 		if got := r.Header.Get("ChatGPT-Account-Id"); got != "static-account" {
 			t.Errorf("account header = %q", got)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[]}`))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}` + "\n\n"))
 	}))
 	defer upstream.Close()
 
