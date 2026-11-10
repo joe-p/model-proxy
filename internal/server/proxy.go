@@ -21,21 +21,25 @@ type requestLog struct {
 	policyModels   []string
 	alias          string
 	provider       string
+	billingMode    string
 	upstream       string
 	stream         bool
 	errorCode      string
 	errorDetail    string
 	clientCanceled bool
 	usage          *usage
+	estimatedCost  *float64
+	pricingSource  string
 }
 
 type usage struct {
-	PromptTokens        int64                `json:"prompt_tokens"`
-	CompletionTokens    int64                `json:"completion_tokens"`
-	TotalTokens         int64                `json:"total_tokens"`
-	Cost                *float64             `json:"cost"`
-	CacheDiscount       *float64             `json:"cache_discount"`
-	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details"`
+	PromptTokens            int64                    `json:"prompt_tokens"`
+	CompletionTokens        int64                    `json:"completion_tokens"`
+	TotalTokens             int64                    `json:"total_tokens"`
+	Cost                    *float64                 `json:"cost"`
+	CacheDiscount           *float64                 `json:"cache_discount"`
+	PromptTokensDetails     *promptTokensDetails     `json:"prompt_tokens_details"`
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details"`
 }
 
 // promptTokensDetails carries the cache breakdown of prompt tokens. Pointers
@@ -43,6 +47,12 @@ type usage struct {
 type promptTokensDetails struct {
 	CachedTokens     *int64 `json:"cached_tokens"`
 	CacheWriteTokens *int64 `json:"cache_write_tokens"`
+}
+
+// completionTokensDetails carries the reasoning-token breakdown of completion
+// tokens.
+type completionTokensDetails struct {
+	ReasoningTokens *int64 `json:"reasoning_tokens"`
 }
 
 var hopByHopHeaders = map[string]struct{}{

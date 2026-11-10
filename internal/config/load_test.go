@@ -662,6 +662,267 @@ func TestLoadRejectsReservedExtraBodyFields(t *testing.T) {
 	}
 }
 
+func TestLoadResolvesCodexAuthDir(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "auth_dir": "credentials"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	provider := cfg.Providers["codex"]
+	if provider.Type != "codex" {
+		t.Fatalf("type = %q", provider.Type)
+	}
+	if provider.APIKey != "" {
+		t.Fatalf("api key = %q, want empty", provider.APIKey)
+	}
+	if want := filepath.Join(dir, "credentials"); provider.AuthDir != want {
+		t.Fatalf("auth dir = %q, want %q", provider.AuthDir, want)
+	}
+}
+
+func TestLoadCodexAuthDirDefaultsToCodexHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["codex"].AuthDir; got != home {
+		t.Fatalf("auth dir = %q, want %q", got, home)
+	}
+}
+
+func TestLoadResolvesPricing(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "pricing": {
+    "source": "models.dev",
+    "url": "https://example.test/catalog.json",
+    "cache": "cache/models.dev.json",
+    "refresh_interval": "1h",
+    "timeout": "5s"
+  },
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    }
+  },
+  "models": {
+    "gpt": {
+      "provider": "codex",
+      "upstream": "gpt-6.1-sol",
+      "pricing": {
+        "input_per_million": 2,
+        "cached_input_per_million": 0.1,
+        "output_per_million": 10
+      }
+    }
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Pricing.Enabled() {
+		t.Fatal("pricing should be enabled")
+	}
+	if cfg.Pricing.URL != "https://example.test/catalog.json" {
+		t.Fatalf("url = %q", cfg.Pricing.URL)
+	}
+	if want := filepath.Join(dir, "cache", "models.dev.json"); cfg.Pricing.Cache != want {
+		t.Fatalf("cache = %q, want %q", cfg.Pricing.Cache, want)
+	}
+	if cfg.Pricing.RefreshInterval != time.Hour {
+		t.Fatalf("refresh interval = %v", cfg.Pricing.RefreshInterval)
+	}
+	if cfg.Pricing.Timeout != 5*time.Second {
+		t.Fatalf("timeout = %v", cfg.Pricing.Timeout)
+	}
+	if got := cfg.Providers["codex"].PricingProvider; got != "openai" {
+		t.Fatalf("pricing provider = %q, want openai", got)
+	}
+	pricing := cfg.Models["gpt"].Pricing
+	if pricing == nil || pricing.InputPerMillion != 2 || pricing.OutputPerMillion != 10 {
+		t.Fatalf("model pricing = %+v", pricing)
+	}
+	if pricing.CachedInputPerMillion == nil || *pricing.CachedInputPerMillion != 0.1 {
+		t.Fatalf("cached pricing = %v", pricing.CachedInputPerMillion)
+	}
+}
+
+func TestLoadPricingDisabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", baseConfig)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pricing.Enabled() {
+		t.Fatalf("pricing should be disabled: %+v", cfg.Pricing)
+	}
+}
+
+func TestLoadRejectsUnknownPricingSource(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "pricing": {"source": "elsewhere"},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "pricing.source") {
+		t.Fatalf("expected pricing source error, got %v", err)
+	}
+}
+
+func TestLoadRejectsIncompleteModelPricing(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {
+      "provider": "openrouter",
+      "upstream": "openai/gpt-4o-mini",
+      "pricing": {"input_per_million": 2}
+    }
+  }
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "input_per_million") {
+		t.Fatalf("expected pricing error, got %v", err)
+	}
+}
+
+func TestLoadCodexBillingModeDefaultsToSubscription(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex"
+    },
+    "other": {
+      "type": "openai-compatible",
+      "base_url": "https://example.test/v1",
+      "api_key_env": "OTHER_KEY"
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+	t.Setenv("OTHER_KEY", "key")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["codex"].BillingMode; got != "subscription" {
+		t.Fatalf("codex billing mode = %q, want subscription", got)
+	}
+	if got := cfg.Providers["other"].BillingMode; got != "" {
+		t.Fatalf("other billing mode = %q, want empty", got)
+	}
+}
+
+func TestLoadRejectsAuthDirForNonCodexProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "custom": {
+      "type": "openai-compatible",
+      "base_url": "https://example.test/v1",
+      "api_key_env": "CUSTOM_KEY",
+      "auth_dir": "credentials"
+    }
+  },
+  "models": {
+    "m": {"provider": "custom", "upstream": "m"}
+  }
+}`)
+	t.Setenv("CUSTOM_KEY", "key")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "auth_dir") {
+		t.Fatalf("expected auth_dir error, got %v", err)
+	}
+}
+
+func TestLoadStillRequiresAPIKeyForNonCodexProviders(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "custom": {
+      "type": "openai-compatible",
+      "base_url": "https://example.test/v1"
+    }
+  },
+  "models": {
+    "m": {"provider": "custom", "upstream": "m"}
+  }
+}`)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "api_key_env") {
+		t.Fatalf("expected api_key_env error, got %v", err)
+	}
+}
+
 func decodeExtraBody(t *testing.T, value map[string]json.RawMessage) map[string]any {
 	t.Helper()
 	data, err := json.Marshal(value)

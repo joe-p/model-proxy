@@ -16,6 +16,7 @@ import (
 type state struct {
 	cfg       *config.Config
 	providers map[string]provider.Provider
+	pricing   CostEstimator
 	logger    *slog.Logger
 }
 
@@ -30,7 +31,7 @@ type Server struct {
 	reloadMu   sync.Mutex
 }
 
-func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger) *Server {
+func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator) *Server {
 	if providers == nil {
 		providers = map[string]provider.Provider{}
 	}
@@ -39,10 +40,11 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 	}
 
 	s := &Server{startedAt: time.Now()}
-	s.state.Store(&state{cfg: cfg, providers: providers, logger: logger})
+	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
 
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("/v1/responses", s.handleResponses)
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/", s.handleNotFound)
@@ -75,7 +77,7 @@ func (s *Server) ShutdownTimeout() time.Duration {
 // Reload atomically swaps the configuration, providers, and logger. Server
 // settings tied to the already-running listener cannot be changed without a
 // restart.
-func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger) error {
+func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator) error {
 	s.reloadMu.Lock()
 	defer s.reloadMu.Unlock()
 
@@ -92,7 +94,7 @@ func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provid
 	if logger == nil {
 		logger = old.logger
 	}
-	s.state.Store(&state{cfg: cfg, providers: providers, logger: logger})
+	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
 	return nil
 }
 
@@ -158,6 +160,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lr.provider != "" {
 		attrs = append(attrs, "provider", lr.provider)
 	}
+	if lr.billingMode != "" {
+		attrs = append(attrs, "billing_mode", lr.billingMode)
+	}
 	if lr.upstream != "" {
 		attrs = append(attrs, "upstream_model", lr.upstream)
 	}
@@ -182,6 +187,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if lr.usage.Cost != nil {
 			attrs = append(attrs, "cost_usd", *lr.usage.Cost)
 		}
+		if lr.estimatedCost != nil {
+			attrs = append(attrs, "estimated_api_cost_usd", *lr.estimatedCost)
+		}
+		if lr.pricingSource != "" {
+			attrs = append(attrs, "pricing_source", lr.pricingSource)
+		}
 		if lr.usage.CacheDiscount != nil {
 			attrs = append(attrs, "cache_discount", *lr.usage.CacheDiscount)
 		}
@@ -191,6 +202,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			if details.CacheWriteTokens != nil {
 				attrs = append(attrs, "cache_write_tokens", *details.CacheWriteTokens)
+			}
+		}
+		if details := lr.usage.CompletionTokensDetails; details != nil {
+			if details.ReasoningTokens != nil {
+				attrs = append(attrs, "reasoning_tokens", *details.ReasoningTokens)
 			}
 		}
 	}

@@ -15,6 +15,7 @@ type Config struct {
 	Server    ServerConfig
 	Logging   LoggingConfig
 	Auth      AuthConfig
+	Pricing   PricingConfig
 	Keys      []VirtualKey
 	Policies  map[string]PolicyConfig
 	Providers map[string]ProviderConfig
@@ -36,6 +37,21 @@ type LoggingConfig struct {
 
 type AuthConfig struct {
 	Enabled bool
+}
+
+// PricingConfig configures optional list-price estimates from a model catalog.
+// An empty Source disables pricing.
+type PricingConfig struct {
+	Source          string
+	URL             string
+	Cache           string
+	RefreshInterval time.Duration
+	Timeout         time.Duration
+}
+
+// Enabled reports whether a pricing catalog is configured.
+func (p PricingConfig) Enabled() bool {
+	return p.Source != ""
 }
 
 type VirtualKey struct {
@@ -81,6 +97,9 @@ type ProviderConfig struct {
 	Type                  string
 	BaseURL               string
 	APIKey                string
+	AuthDir               string
+	BillingMode           string
+	PricingProvider       string
 	DialTimeout           time.Duration
 	ResponseHeaderTimeout time.Duration
 	Referer               string
@@ -93,4 +112,13 @@ type ModelConfig struct {
 	Provider  string
 	Upstream  string
 	ExtraBody map[string]json.RawMessage
+	Pricing   *ModelPricing
+}
+
+// ModelPricing is an explicit list-price override in USD per million tokens.
+// CachedInputPerMillion falls back to InputPerMillion when nil.
+type ModelPricing struct {
+	InputPerMillion       float64
+	CachedInputPerMillion *float64
+	OutputPerMillion      float64
 }

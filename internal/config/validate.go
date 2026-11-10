@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 )
 
-func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, error) {
+func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string) (*Config, error) {
 	cfg := &Config{
 		EnvFile:   envPath,
 		Policies:  make(map[string]PolicyConfig, len(raw.Policies)),
@@ -70,6 +72,11 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		cfg.Auth.Enabled = *raw.Auth.Enabled
 	}
 
+	cfg.Pricing, err = resolvePricing(raw.Pricing, configDir)
+	if err != nil {
+		return nil, err
+	}
+
 	keyNames := make(map[string]struct{}, len(raw.VirtualKeys))
 	keyValues := make(map[string]string, len(raw.VirtualKeys))
 	for i, rawKey := range raw.VirtualKeys {
@@ -118,21 +125,62 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		}
 		rawProvider := raw.Providers[name]
 
+		providerType := strings.TrimSpace(rawProvider.Type)
+		if providerType == "" {
+			// Backwards compatibility: a provider without an explicit type is
+			// identified by its configured name.
+			providerType = name
+		}
+		codexProvider := isCodexProvider(providerType)
+
+		if rawProvider.AuthDir != "" && !codexProvider {
+			return nil, fmt.Errorf("provider %q: auth_dir is only supported for codex providers", name)
+		}
+
 		baseURL, err := validateBaseURL(rawProvider.BaseURL)
 		if err != nil {
 			return nil, fmt.Errorf("provider %q: %w", name, err)
 		}
+
+		apiKey := ""
 		apiKeyEnv := strings.TrimSpace(rawProvider.APIKeyEnv)
-		if apiKeyEnv == "" {
+		if apiKeyEnv != "" {
+			var ok bool
+			apiKey, ok = lookupEnv(dotenv, apiKeyEnv)
+			if !ok {
+				return nil, fmt.Errorf("provider %q: environment variable %s is not set", name, apiKeyEnv)
+			}
+			if apiKey == "" {
+				return nil, fmt.Errorf("provider %q: environment variable %s is empty", name, apiKeyEnv)
+			}
+		} else if !codexProvider {
 			return nil, fmt.Errorf("provider %q: api_key_env must not be empty", name)
 		}
-		apiKey, ok := lookupEnv(dotenv, apiKeyEnv)
-		if !ok {
-			return nil, fmt.Errorf("provider %q: environment variable %s is not set", name, apiKeyEnv)
+
+		authDir := ""
+		if codexProvider && apiKey == "" {
+			authDir, err = resolveAuthDir(rawProvider.AuthDir, configDir)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q: %w", name, err)
+			}
 		}
-		if apiKey == "" {
-			return nil, fmt.Errorf("provider %q: environment variable %s is empty", name, apiKeyEnv)
+
+		billingMode := strings.TrimSpace(rawProvider.BillingMode)
+		if billingMode == "" && codexProvider {
+			billingMode = "subscription"
 		}
+		if err := validateLogValue(billingMode, fmt.Sprintf("provider %q billing_mode", name)); err != nil {
+			return nil, err
+		}
+
+		pricingProvider := strings.TrimSpace(rawProvider.PricingProvider)
+		if pricingProvider == "" && codexProvider {
+			pricingProvider = "openai"
+		}
+		if err := validateLogValue(pricingProvider, fmt.Sprintf("provider %q pricing_provider", name)); err != nil {
+			return nil, err
+		}
+
 		dialTimeout, err := parseDuration(rawProvider.DialTimeout, 10*time.Second, fmt.Sprintf("provider %q dial_timeout", name))
 		if err != nil {
 			return nil, err
@@ -145,17 +193,14 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		if err != nil {
 			return nil, err
 		}
-		providerType := strings.TrimSpace(rawProvider.Type)
-		if providerType == "" {
-			// Backwards compatibility: a provider without an explicit type is
-			// identified by its configured name.
-			providerType = name
-		}
 		cfg.Providers[name] = ProviderConfig{
 			Name:                  name,
 			Type:                  providerType,
 			BaseURL:               baseURL,
 			APIKey:                apiKey,
+			AuthDir:               authDir,
+			BillingMode:           billingMode,
+			PricingProvider:       pricingProvider,
 			DialTimeout:           dialTimeout,
 			ResponseHeaderTimeout: responseTimeout,
 			Referer:               strings.TrimSpace(rawProvider.Referer),
@@ -192,11 +237,16 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		if err != nil {
 			return nil, fmt.Errorf("model %q extra_body: %w", alias, err)
 		}
+		modelPricing, err := normalizeModelPricing(rawModel.Pricing, alias)
+		if err != nil {
+			return nil, err
+		}
 		cfg.Models[alias] = ModelConfig{
 			Alias:     alias,
 			Provider:  providerName,
 			Upstream:  upstream,
 			ExtraBody: effectiveExtra,
+			Pricing:   modelPricing,
 		}
 	}
 	if len(cfg.Models) == 0 {
@@ -269,6 +319,141 @@ func parseDuration(value *string, fallback time.Duration, field string) (time.Du
 		return 0, fmt.Errorf("%s must be positive", field)
 	}
 	return d, nil
+}
+
+func isCodexProvider(providerType string) bool {
+	return providerType == "codex" || providerType == "chatgpt"
+}
+
+const (
+	defaultPricingURL     = "https://models.dev/api.json"
+	defaultPricingRefresh = 24 * time.Hour
+	defaultPricingTimeout = 30 * time.Second
+)
+
+func resolvePricing(raw *rawPricing, configDir string) (PricingConfig, error) {
+	if raw == nil {
+		return PricingConfig{}, nil
+	}
+
+	source := "models.dev"
+	if raw.Source != nil {
+		source = strings.ToLower(strings.TrimSpace(*raw.Source))
+		if source == "" {
+			return PricingConfig{}, fmt.Errorf("pricing.source must not be empty")
+		}
+	}
+	if source != "models.dev" {
+		return PricingConfig{}, fmt.Errorf("pricing.source must be \"models.dev\"")
+	}
+
+	rawURL := defaultPricingURL
+	if raw.URL != nil && strings.TrimSpace(*raw.URL) != "" {
+		rawURL = strings.TrimSpace(*raw.URL)
+	}
+	catalogURL, err := validateBaseURL(rawURL)
+	if err != nil {
+		return PricingConfig{}, fmt.Errorf("pricing.url: %w", err)
+	}
+
+	cache := ""
+	if raw.Cache != nil {
+		cache = strings.TrimSpace(*raw.Cache)
+	}
+	if cache == "" {
+		if dir, err := os.UserCacheDir(); err == nil {
+			cache = filepath.Join(dir, "model-proxy", "models.dev.json")
+		}
+	} else {
+		cache = expandHomePath(cache)
+		if !filepath.IsAbs(cache) {
+			cache = filepath.Join(configDir, cache)
+		}
+		cache = filepath.Clean(cache)
+	}
+
+	refreshInterval, err := parseDuration(raw.RefreshInterval, defaultPricingRefresh, "pricing.refresh_interval")
+	if err != nil {
+		return PricingConfig{}, err
+	}
+	timeout, err := parseDuration(raw.Timeout, defaultPricingTimeout, "pricing.timeout")
+	if err != nil {
+		return PricingConfig{}, err
+	}
+
+	return PricingConfig{
+		Source:          source,
+		URL:             catalogURL,
+		Cache:           cache,
+		RefreshInterval: refreshInterval,
+		Timeout:         timeout,
+	}, nil
+}
+
+func normalizeModelPricing(raw *rawModelPricing, alias string) (*ModelPricing, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if raw.InputPerMillion == nil || raw.OutputPerMillion == nil {
+		return nil, fmt.Errorf("model %q pricing: input_per_million and output_per_million are required", alias)
+	}
+	if *raw.InputPerMillion < 0 || *raw.OutputPerMillion < 0 {
+		return nil, fmt.Errorf("model %q pricing: rates must not be negative", alias)
+	}
+	if raw.CachedInputPerMillion != nil && *raw.CachedInputPerMillion < 0 {
+		return nil, fmt.Errorf("model %q pricing: cached_input_per_million must not be negative", alias)
+	}
+	return &ModelPricing{
+		InputPerMillion:       *raw.InputPerMillion,
+		CachedInputPerMillion: raw.CachedInputPerMillion,
+		OutputPerMillion:      *raw.OutputPerMillion,
+	}, nil
+}
+
+func expandHomePath(path string) string {
+	if path == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
+}
+
+// resolveAuthDir resolves a Codex credential directory. An empty value uses
+// $CODEX_HOME, then ~/.codex. Relative paths are resolved from the config file.
+func resolveAuthDir(value, configDir string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	}
+	if value == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve default Codex auth_dir: %w", err)
+		}
+		value = filepath.Join(home, ".codex")
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve Codex auth_dir: %w", err)
+		}
+		if value == "~" {
+			value = home
+		} else {
+			value = filepath.Join(home, value[2:])
+		}
+	}
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(configDir, value)
+	}
+	return filepath.Clean(value), nil
 }
 
 func validateBaseURL(value string) (string, error) {

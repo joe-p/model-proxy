@@ -16,6 +16,7 @@ type rawConfig struct {
 	Server      rawServer              `json:"server"`
 	Logging     rawLogging             `json:"logging"`
 	Auth        *rawAuth               `json:"auth"`
+	Pricing     *rawPricing            `json:"pricing"`
 	VirtualKeys []rawVirtualKey        `json:"virtual_keys"`
 	Policies    []rawPolicy            `json:"policies"`
 	Providers   map[string]rawProvider `json:"providers"`
@@ -39,6 +40,14 @@ type rawAuth struct {
 	Enabled *bool `json:"enabled"`
 }
 
+type rawPricing struct {
+	Source          *string `json:"source"`
+	URL             *string `json:"url"`
+	Cache           *string `json:"cache"`
+	RefreshInterval *string `json:"refresh_interval"`
+	Timeout         *string `json:"timeout"`
+}
+
 type rawVirtualKey struct {
 	Name      string `json:"name"`
 	KeyEnv    string `json:"key_env"`
@@ -56,6 +65,9 @@ type rawProvider struct {
 	Type                  string         `json:"type"`
 	BaseURL               string         `json:"base_url"`
 	APIKeyEnv             string         `json:"api_key_env"`
+	AuthDir               string         `json:"auth_dir"`
+	BillingMode           string         `json:"billing_mode"`
+	PricingProvider       string         `json:"pricing_provider"`
 	DialTimeout           *string        `json:"dial_timeout"`
 	ResponseHeaderTimeout *string        `json:"response_header_timeout"`
 	Referer               string         `json:"referer"`
@@ -64,9 +76,16 @@ type rawProvider struct {
 }
 
 type rawModel struct {
-	Provider  string         `json:"provider"`
-	Upstream  string         `json:"upstream"`
-	ExtraBody map[string]any `json:"extra_body"`
+	Provider  string           `json:"provider"`
+	Upstream  string           `json:"upstream"`
+	ExtraBody map[string]any   `json:"extra_body"`
+	Pricing   *rawModelPricing `json:"pricing"`
+}
+
+type rawModelPricing struct {
+	InputPerMillion       *float64 `json:"input_per_million"`
+	CachedInputPerMillion *float64 `json:"cached_input_per_million"`
+	OutputPerMillion      *float64 `json:"output_per_million"`
 }
 
 // Load reads, resolves, and validates a JWCC (JSON with comments and trailing
@@ -110,7 +129,7 @@ func Load(path string) (*Config, error) {
 		}
 	}
 
-	cfg, err := resolve(envPath, raw, dotenv)
+	cfg, err := resolve(envPath, filepath.Dir(abs), raw, dotenv)
 	if err != nil {
 		return nil, fmt.Errorf("config %s: %w", abs, err)
 	}

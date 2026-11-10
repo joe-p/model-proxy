@@ -10,6 +10,8 @@ one or more upstream providers.
 ## Features
 
 - `POST /v1/chat/completions`, streaming and non-streaming.
+- `POST /v1/responses` for Responses-native clients such as Codex, streaming
+  and non-streaming, with transparent response passthrough.
 - `GET /v1/models` backed by a strict alias registry.
 - `GET /healthz` liveness endpoint.
 - JWCC configuration (JSON with comments and trailing commas) with strict
@@ -20,10 +22,13 @@ one or more upstream providers.
 - Provider-level and model-level extra request-body fields, merged per request.
 - Provider-agnostic interface with an OpenRouter implementation and a generic
   OpenAI-compatible implementation.
+- Codex CLI OAuth credentials with automatic access-token refresh.
 - Transparent upstream response bodies and SSE streams.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
 - OpenRouter-compatible usage normalization for non-OpenRouter providers.
 - Token and cost extraction from responses for structured access logs.
+- Subscription billing-mode tagging for providers such as Codex.
+- Optional models.dev list-price estimates with a configurable refresh timer.
 - Atomic `SIGHUP` reload.
 
 ## Quick start
@@ -103,6 +108,16 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
     "enabled": true, // When enabled, at least one virtual key must resolve.
   },
 
+  // Optional list-price estimates from models.dev. The catalog is cached on
+  // disk and refreshed in the background. Omit this block to disable estimates.
+  "pricing": {
+    "source": "models.dev",
+    "url": "https://models.dev/api.json",
+    "cache": "~/.cache/model-proxy/models.dev.json",
+    "refresh_interval": "24h",
+    "timeout": "30s",
+  },
+
   // A virtual key's "policy" is optional. Keys without a policy may use every
   // configured model alias.
   "virtual_keys": [
@@ -142,8 +157,8 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
 
   // Provider keys are local names. "type" selects the implementation and may
   // be omitted when it matches the provider name. Supported types are
-  // "openrouter" and "openai-compatible" (aliases: "openai", "phala",
-  // "private-ai-gateway").
+  // "openrouter", "openai-compatible" (aliases: "openai", "phala",
+  // "private-ai-gateway"), and "codex" (alias: "chatgpt").
   "providers": {
     "openrouter": {
       "type": "openrouter",
@@ -182,6 +197,16 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
         },
       },
     },
+    // ChatGPT/Codex subscription credentials from the OpenAI Codex CLI.
+    // Reads <auth_dir>/auth.json and refreshes expired access tokens. Without
+    // auth_dir, $CODEX_HOME or ~/.codex is used.
+    // "codex": {
+    //   "type": "codex",
+    //   "base_url": "https://chatgpt.com/backend-api/codex",
+    //   "auth_dir": "~/.codex",
+    //   "billing_mode": "subscription",
+    //   "pricing_provider": "openai",
+    // },
   },
 
   "models": {
@@ -232,6 +257,16 @@ Rules:
   startup.
 - `server.listen` and `read_header_timeout` changes require a restart; other
   values can be reloaded with `SIGHUP`.
+- For `codex` providers, `auth_dir` defaults to `$CODEX_HOME` or `~/.codex`.
+  `auth_dir` is rejected for other provider types.
+- `billing_mode` is an optional per-provider log label. It defaults to
+  `subscription` for `codex` providers and is omitted for others.
+- `pricing` is optional. When configured, the models.dev catalog is cached on
+  disk and refreshed every `refresh_interval` (default `24h`). Omit it to
+  disable estimates.
+- `pricing_provider` selects the models.dev provider namespace. It defaults to
+  `openai` for `codex` providers and is otherwise unset.
+- A model may set an explicit `pricing` block to override the catalog.
 
 ### Providers
 
@@ -245,6 +280,8 @@ used. Supported types are:
   Completions API, including Private AI Gateway, vLLM, and similar servers.
   `openai`, `phala`, and `private-ai-gateway` are accepted aliases for this
   type.
+- `codex` (alias `chatgpt`): OpenAI-compatible transport authenticated with
+  OpenAI Codex CLI OAuth credentials. See [Codex auth](#codex-auth).
 
 Private AI Gateway is not a separate implementation. Configure it as an
 `openai-compatible` provider. The Phala-hosted deployment is available at
@@ -269,6 +306,47 @@ specific attested sessions. These fields are removed by the gateway before the
 request reaches the model provider. Responses and verification headers such as
 `X-Receipt-Id`, `X-ACI-Identity`, and `X-ACI-Keyset-Digest` pass through
 unchanged.
+
+### Codex auth
+
+The `codex` provider (alias `chatgpt`) reads the OAuth credentials written by
+the OpenAI Codex CLI. By default it looks in `$CODEX_HOME`, then `~/.codex`, for
+`auth.json`. Set `auth_dir` to use another directory; relative paths resolve
+from the config file. No `api_key_env` is required.
+
+```json
+"codex": {
+  "type": "codex",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "auth_dir": "~/.codex",
+  "billing_mode": "subscription"
+}
+```
+
+The proxy re-reads `auth.json` on every request. A valid access token is used
+as-is. When it expires, the proxy exchanges the stored refresh token at OpenAI's
+OAuth token endpoint and writes the refreshed tokens back to `auth.json`,
+preserving unrelated fields in the file. The `ChatGPT-Account-Id` header is
+taken from the file's `account_id` or derived from the token claims.
+
+If `api_key_env` is set for a `codex` provider, its value is used as a static
+bearer token and the Codex auth file is ignored.
+
+Use one proxy process per `auth.json`. Refresh tokens are single-use, so
+separate processes sharing a file can race and invalidate each other's
+credentials.
+
+The Codex backend's native API is the Responses API. Use
+`POST /v1/responses` for Codex clients; the proxy forwards the request and SSE
+stream unchanged and observes usage only for its access log. The `codex`
+provider still exposes the proxy's Chat Completions transport
+(`POST <base_url>/chat/completions`) for chat-compatible bridges, but the real
+Codex backend does not serve that endpoint.
+
+A `codex` provider defaults to `"billing_mode": "subscription"`. Override it
+with `billing_mode` if the same provider shape points at an API-billed service.
+With a pricing catalog configured, `estimated_api_cost_usd` gives the
+API-equivalent list price for the same tokens; it is not a subscription charge.
 
 ### Model aliases
 
@@ -332,9 +410,11 @@ These are request-body fields, not HTTP headers. OpenRouter reads
 
 ## Behavior
 
-- Success bodies and SSE streams are forwarded byte-for-byte.
-- The proxy does not inject usage options; providers include usage in
-  responses according to their own defaults.
+- Success bodies and SSE streams are forwarded byte-for-byte, except for the
+  chat-completions usage normalization described below.
+- Responses API bodies and streams are never normalized. Chat streaming
+  requests to non-OpenRouter providers set `stream_options.include_usage` as
+  described below.
 - `X-Model-Proxy-Alias` and `X-Model-Proxy-Upstream` describe the selected
   route. `X-Request-ID` is accepted from the client if valid, otherwise
   generated, forwarded upstream, echoed to the client, and included in logs.
@@ -372,6 +452,96 @@ behavior from other providers.
 
 OpenRouter responses are not normalized and remain byte-for-byte transparent.
 
+### Responses API
+
+`POST /v1/responses` forwards requests to `<base_url>/responses` and returns the
+upstream status, headers, and body unchanged. The model alias is rewritten,
+configured `extra_body` is merged, and virtual-key authentication and policies
+apply exactly as for chat completions. The proxy does not normalize Responses
+bodies and does not inject `stream_options`, so Responses-native clients keep
+their own usage accounting.
+
+When `logging.log_usage` is enabled, the proxy observes usage for its access
+log from `response.completed` and `response.incomplete` events, or from the
+top-level `usage` object of a non-streaming response:
+
+| Access-log field | Responses field |
+| --- | --- |
+| `prompt_tokens` | `input_tokens` |
+| `completion_tokens` | `output_tokens` |
+| `total_tokens` | `total_tokens` |
+| `cached_tokens` | `input_tokens_details.cached_tokens` |
+| `reasoning_tokens` | `output_tokens_details.reasoning_tokens` |
+
+The response body is still forwarded byte-for-byte; only the log records these
+values. `cost_usd` is logged only if the upstream includes `usage.cost`.
+ChatGPT subscription responses normally report tokens but not a dollar cost.
+
+### Pricing estimates
+
+For upstreams that do not report `cost`, model-proxy can estimate an
+API-equivalent cost from the [models.dev](https://models.dev) catalog:
+
+```jsonc
+"pricing": {
+  "source": "models.dev",
+  "url": "https://models.dev/api.json",
+  "cache": "~/.cache/model-proxy/models.dev.json",
+  "refresh_interval": "24h",
+  "timeout": "30s"
+}
+```
+
+The catalog is loaded from the cache at startup and refreshed in the background
+every `refresh_interval`. A failed refresh keeps the previous catalog; a missing
+cache is not fatal, and estimates are simply unavailable until the first
+successful fetch. `SIGHUP` rebuilds the pricing loop along with the rest of the
+configuration.
+
+Provider-to-catalog mapping uses `pricing_provider`, which defaults to `openai`
+for `codex` providers:
+
+```jsonc
+"codex": {
+  "type": "codex",
+  "pricing_provider": "openai"
+}
+```
+
+A model can override the catalog with explicit per-million rates:
+
+```jsonc
+"gpt": {
+  "provider": "codex",
+  "upstream": "gpt-6.1-sol",
+  "pricing": {
+    "input_per_million": 2,
+    "cached_input_per_million": 0.1,
+    "output_per_million": 10
+  }
+}
+```
+
+Estimates use:
+
+```text
+uncached_input = prompt_tokens - cached_tokens - cache_write_tokens
+cost =
+  uncached_input * input_rate
+  + cached_tokens * cached_input_rate
+  + cache_write_tokens * cache_write_rate
+  + completion_tokens * output_rate
+```
+
+Rates are USD per million tokens. models.dev context tiers are applied from
+`prompt_tokens`, and `reasoning_tokens` is not added separately because it is
+already included in `completion_tokens`.
+
+When the upstream reports an actual `usage.cost`, it wins and no estimate is
+logged. Otherwise the access log includes `estimated_api_cost_usd` and
+`pricing_source` (`models.dev` or `config`). This is a list-price estimate, not
+the amount charged to a subscription.
+
 ### Proxy-generated errors
 
 | Condition | Status | Code |
@@ -393,18 +563,28 @@ Upstream 4xx/5xx responses are returned with their original status and body.
 
 Logs go to stderr as JSON by default. Access-log fields include request ID,
 method, path, status, latency, bytes out, user agent, key name, the key's active
-policy (`policy`, `policy_mode`, and `policy_models`), alias, provider, upstream
-model, stream flag, error code, and client-cancellation state. A virtual key's
-`user_agent` setting replaces the client-supplied user agent in the log entry.
+policy (`policy`, `policy_mode`, and `policy_models`), alias, provider,
+billing mode, upstream model, stream flag, error code, and client-cancellation
+state. A virtual key's `user_agent` setting replaces the client-supplied user
+agent in the log entry.
 When `logging.log_usage` is enabled, the proxy observes the response body
 without changing it and adds `prompt_tokens`, `completion_tokens`,
 `total_tokens`, and, when the upstream reports them, `cost_usd`,
-`cache_discount`, `cached_tokens`, and `cache_write_tokens`. `cost_usd` is
-the upstream's `usage.cost` (for OpenRouter, credits, 1:1 with USD);
-`cached_tokens` and
-`cache_write_tokens` come from `usage.prompt_tokens_details` and are logged as
-reported, including `0` for a cache miss. Fields the upstream omits are not
-logged at all.
+`cache_discount`, `cached_tokens`, `cache_write_tokens`, and
+`reasoning_tokens`. `cost_usd` is the upstream's `usage.cost` (for OpenRouter,
+credits, 1:1 with USD); `cached_tokens` and `cache_write_tokens` come from
+`usage.prompt_tokens_details`, and `reasoning_tokens` comes from
+`usage.completion_tokens_details`; cache values are logged as reported,
+including `0` for a cache miss. Fields the upstream omits are not logged at
+all.
+
+`billing_mode` is configured per provider. It defaults to `subscription` for
+`codex` providers and is omitted otherwise. It tells a log consumer that token
+usage did not incur per-token dollar cost, so a missing `cost_usd` is expected.
+
+When the upstream does not report `usage.cost` and pricing is available, the log
+also includes `estimated_api_cost_usd` and `pricing_source`. This is a
+models.dev or configured list-price estimate, not actual subscription billing.
 
 Secrets, prompts, and response bodies are never logged.
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/joe-p/model-proxy/internal/config"
+	"github.com/joe-p/model-proxy/internal/pricing"
 	"github.com/joe-p/model-proxy/internal/provider"
 	"github.com/joe-p/model-proxy/internal/provider/openai"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
@@ -23,6 +24,14 @@ import (
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+}
+
+type fakeEstimator struct {
+	cost float64
+}
+
+func (f fakeEstimator) Estimate(string, string, pricing.Usage) (float64, bool) {
+	return f.cost, true
 }
 
 func (b *lockedBuffer) Write(p []byte) (int, error) {
@@ -43,6 +52,11 @@ func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) 
 }
 
 func newTestProxyWithProvider(t *testing.T, upstreamURL, providerType string, tweak func(*config.Config)) (*httptest.Server, *lockedBuffer) {
+	t.Helper()
+	return newTestProxyWithPricing(t, upstreamURL, providerType, tweak, nil)
+}
+
+func newTestProxyWithPricing(t *testing.T, upstreamURL, providerType string, tweak func(*config.Config), estimator server.CostEstimator) (*httptest.Server, *lockedBuffer) {
 	t.Helper()
 
 	providerName := "openrouter"
@@ -111,7 +125,7 @@ func newTestProxyWithProvider(t *testing.T, upstreamURL, providerType string, tw
 		t.Fatalf("build provider: %v", err)
 	}
 
-	srv := server.New(cfg, map[string]provider.Provider{providerName: p}, logger)
+	srv := server.New(cfg, map[string]provider.Provider{providerName: p}, logger, estimator)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 	return ts, logBuf
@@ -140,6 +154,22 @@ func postChat(t *testing.T, proxyURL, key, body string) *http.Response {
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "model-proxy-test-client/1.0")
 	req.Header.Set("X-Request-ID", "client-request-id")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	return resp
+}
+
+func postResponses(t *testing.T, proxyURL, key, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/responses", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do request: %v", err)
@@ -510,6 +540,7 @@ func TestPrivateAIGatewayNormalizesUsageToOpenRouter(t *testing.T) {
 	waitForLog(t, logs, `"total_tokens":15`)
 	waitForLog(t, logs, `"cached_tokens":4`)
 	waitForLog(t, logs, `"cache_write_tokens":2`)
+	waitForLog(t, logs, `"reasoning_tokens":3`)
 }
 
 func TestPrivateAIGatewayRequestsAndNormalizesStreamingUsage(t *testing.T) {
@@ -583,6 +614,162 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 	}
 }
 
+func TestResponsesStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
+	const streamBody = "event: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","delta":"hi"}` + "\n\n" +
+		"event: response.completed\n" +
+		`data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":4},"output_tokens":5,"output_tokens_details":{"reasoning_tokens":2},"total_tokens":15}}}` + "\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			t.Errorf("authorization = %q", got)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		var model string
+		_ = json.Unmarshal(fields["model"], &model)
+		if model != "openai/gpt-4o-mini" {
+			t.Errorf("model = %q", model)
+		}
+		if _, exists := fields["stream_options"]; exists {
+			t.Error("stream_options must not be injected into Responses requests")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(streamBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.BillingMode = "subscription"
+		cfg.Providers["phala"] = providerCfg
+	})
+
+	resp := postResponses(t, proxy.URL, "test-key", `{"model":"fast","input":[{"role":"user","content":"hi"}],"stream":true}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != streamBody {
+		t.Fatalf("body was modified:\n%s", body)
+	}
+
+	waitForLog(t, logs, `"billing_mode":"subscription"`)
+	waitForLog(t, logs, `"prompt_tokens":10`)
+	waitForLog(t, logs, `"completion_tokens":5`)
+	waitForLog(t, logs, `"total_tokens":15`)
+	waitForLog(t, logs, `"cached_tokens":4`)
+	waitForLog(t, logs, `"reasoning_tokens":2`)
+}
+
+func TestResponsesNonStreamingLogsUsage(t *testing.T) {
+	const responseBody = `{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":12,"input_tokens_details":{"cached_tokens":3},"output_tokens":7,"output_tokens_details":{"reasoning_tokens":4},"total_tokens":19},"output":[]}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.BillingMode = "subscription"
+		cfg.Providers["phala"] = providerCfg
+	})
+
+	resp := postResponses(t, proxy.URL, "test-key", `{"model":"fast","input":[{"role":"user","content":"hi"}],"stream":false}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != responseBody {
+		t.Fatalf("body was modified:\n%s", body)
+	}
+
+	waitForLog(t, logs, `"prompt_tokens":12`)
+	waitForLog(t, logs, `"completion_tokens":7`)
+	waitForLog(t, logs, `"total_tokens":19`)
+	waitForLog(t, logs, `"cached_tokens":3`)
+	waitForLog(t, logs, `"reasoning_tokens":4`)
+	waitForLog(t, logs, `"billing_mode":"subscription"`)
+}
+
+func TestResponsesLogsEstimatedCost(t *testing.T) {
+	const responseBody = `{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":400},"output_tokens":300,"total_tokens":1300},"output":[]}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithPricing(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.BillingMode = "subscription"
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["phala"] = providerCfg
+	}, fakeEstimator{cost: 0.00424})
+
+	resp := postResponses(t, proxy.URL, "test-key", `{"model":"fast","input":[{"role":"user","content":"hi"}],"stream":false}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	waitForLog(t, logs, `"estimated_api_cost_usd":0.00424`)
+	waitForLog(t, logs, `"pricing_source":"models.dev"`)
+	waitForLog(t, logs, `"billing_mode":"subscription"`)
+}
+
+func TestChatLogsConfiguredPriceOverride(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","object":"chat.completion","usage":{"prompt_tokens":1000,"completion_tokens":300,"total_tokens":1300,"prompt_tokens_details":{"cached_tokens":400}},"choices":[]}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	cachedRate := 0.1
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		modelCfg := cfg.Models["fast"]
+		modelCfg.Pricing = &config.ModelPricing{
+			InputPerMillion:       2,
+			CachedInputPerMillion: &cachedRate,
+			OutputPerMillion:      10,
+		}
+		cfg.Models["fast"] = modelCfg
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	waitForLog(t, logs, `"estimated_api_cost_usd":0.00424`)
+	waitForLog(t, logs, `"pricing_source":"config"`)
+}
+
 func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{
@@ -598,7 +785,7 @@ func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
 		},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := server.New(cfg, nil, logger)
+	srv := server.New(cfg, nil, logger, nil)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 
@@ -606,7 +793,7 @@ func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
 	reloaded.Models = map[string]config.ModelConfig{
 		"new": {Alias: "new", Provider: "openrouter", Upstream: "openai/gpt-4o"},
 	}
-	if err := srv.Reload(&reloaded, nil, logger); err != nil {
+	if err := srv.Reload(&reloaded, nil, logger, nil); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
@@ -627,7 +814,7 @@ func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
 
 	bad := reloaded
 	bad.Server.Listen = "127.0.0.1:1"
-	if err := srv.Reload(&bad, nil, logger); err == nil {
+	if err := srv.Reload(&bad, nil, logger, nil); err == nil {
 		t.Fatal("expected listener change to be rejected")
 	}
 }

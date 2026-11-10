@@ -37,6 +37,32 @@ func TestBuildProvidersSupportsOpenAICompatibleAliases(t *testing.T) {
 	}
 }
 
+func TestBuildProvidersSupportsCodex(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"codex": {
+				Name:                  "codex",
+				Type:                  "codex",
+				BaseURL:               "https://chatgpt.com/backend-api/codex",
+				AuthDir:               t.TempDir(),
+				DialTimeout:           time.Second,
+				ResponseHeaderTimeout: time.Second,
+			},
+		},
+		Models: map[string]config.ModelConfig{
+			"gpt": {Alias: "gpt", Provider: "codex", Upstream: "gpt-5"},
+		},
+	}
+
+	providers, err := buildProviders(cfg)
+	if err != nil {
+		t.Fatalf("buildProviders: %v", err)
+	}
+	if got := providers["codex"].Name(); got != "codex" {
+		t.Fatalf("provider name = %q", got)
+	}
+}
+
 func TestBuildProvidersRejectsUnknownType(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{

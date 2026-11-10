@@ -24,6 +24,16 @@
     "enabled": true // When enabled, at least one virtual key must resolve.
   },
 
+  // Optional list-price estimates from models.dev. The catalog is cached on
+  // disk and refreshed in the background. Omit this block to disable estimates.
+  "pricing": {
+    "source": "models.dev",
+    "url": "https://models.dev/api.json",
+    "cache": "~/.cache/model-proxy/models.dev.json",
+    "refresh_interval": "24h",
+    "timeout": "30s"
+  },
+
   // A virtual key's "policy" is optional. Keys without a policy may use every
   // configured model alias.
   "virtual_keys": [
@@ -63,8 +73,8 @@
 
   // Provider keys are local names. "type" selects the implementation and may
   // be omitted when it matches the provider name. Supported types are
-  // "openrouter" and "openai-compatible" (aliases: "openai", "phala",
-  // "private-ai-gateway").
+  // "openrouter", "openai-compatible" (aliases: "openai", "phala",
+  // "private-ai-gateway"), and "codex" (alias: "chatgpt").
   "providers": {
     "openrouter": {
       "type": "openrouter",
@@ -102,7 +112,20 @@
           "zdr": true
         }
       }
-    }
+    },
+
+    // ChatGPT/Codex subscription credentials from the OpenAI Codex CLI.
+    // Reads <auth_dir>/auth.json and refreshes expired access tokens. Without
+    // auth_dir, $CODEX_HOME or ~/.codex is used. api_key_env is optional; when
+    // set it is used as a static bearer token instead of the auth file.
+    // billing_mode defaults to "subscription" for codex providers.
+    // "codex": {
+    //   "type": "codex",
+    //   "base_url": "https://chatgpt.com/backend-api/codex",
+    //   "auth_dir": "~/.codex",
+    //   "billing_mode": "subscription",
+    //   "pricing_provider": "openai",
+    // }
   },
 
   "models": {

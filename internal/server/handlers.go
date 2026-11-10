@@ -194,6 +194,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	lr.alias = alias
 	lr.provider = model.Provider
+	lr.billingMode = cfg.Providers[model.Provider].BillingMode
 	lr.upstream = model.Upstream
 	lr.stream = stream
 
@@ -247,6 +248,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Context().Err() != nil {
 		lr.clientCanceled = true
 	}
+	applyEstimatedCost(lr, st, model)
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {

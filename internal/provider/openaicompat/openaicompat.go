@@ -18,6 +18,16 @@ import (
 // DefaultPath is appended to the configured base URL for chat requests.
 const DefaultPath = "/chat/completions"
 
+// DefaultResponsesPath is appended to the configured base URL for Responses
+// API requests.
+const DefaultResponsesPath = "/responses"
+
+// TokenSource resolves a per-request upstream credential. Implementations such
+// as the Codex authenticator read and refresh credentials from disk.
+type TokenSource interface {
+	Token(ctx context.Context) (accessToken, accountID string, err error)
+}
+
 // Options configures an OpenAI-compatible provider.
 type Options struct {
 	Name                  string
@@ -26,8 +36,17 @@ type Options struct {
 	DialTimeout           time.Duration
 	ResponseHeaderTimeout time.Duration
 
-	// Path is appended to BaseURL. DefaultPath is used when empty.
+	// TokenSource supplies a dynamic credential instead of APIKey. When set,
+	// it takes precedence over APIKey.
+	TokenSource TokenSource
+
+	// Path is appended to BaseURL for chat completions. DefaultPath is used
+	// when empty.
 	Path string
+
+	// ResponsesPath is appended to BaseURL for Responses API calls.
+	// DefaultResponsesPath is used when empty.
+	ResponsesPath string
 
 	// Headers are additional request headers, such as OpenRouter's
 	// attribution headers. They are set after the standard headers.
@@ -35,12 +54,14 @@ type Options struct {
 }
 
 type Provider struct {
-	name    string
-	baseURL string
-	path    string
-	apiKey  string
-	headers http.Header
-	client  *http.Client
+	name          string
+	baseURL       string
+	path          string
+	responsesPath string
+	apiKey        string
+	tokenSource   TokenSource
+	headers       http.Header
+	client        *http.Client
 }
 
 func New(opts Options) (*Provider, error) {
@@ -50,8 +71,8 @@ func New(opts Options) (*Provider, error) {
 	if opts.BaseURL == "" {
 		return nil, fmt.Errorf("provider base URL must not be empty")
 	}
-	if opts.APIKey == "" {
-		return nil, fmt.Errorf("provider API key must not be empty")
+	if opts.APIKey == "" && opts.TokenSource == nil {
+		return nil, fmt.Errorf("provider API key or token source must not be empty")
 	}
 	if opts.DialTimeout <= 0 {
 		return nil, fmt.Errorf("provider dial timeout must be positive")
@@ -60,13 +81,8 @@ func New(opts Options) (*Provider, error) {
 		return nil, fmt.Errorf("provider response header timeout must be positive")
 	}
 
-	path := opts.Path
-	if path == "" {
-		path = DefaultPath
-	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
+	path := normalizePath(opts.Path, DefaultPath)
+	responsesPath := normalizePath(opts.ResponsesPath, DefaultResponsesPath)
 
 	headers := make(http.Header, len(opts.Headers))
 	for key, value := range opts.Headers {
@@ -86,11 +102,13 @@ func New(opts Options) (*Provider, error) {
 	}
 
 	return &Provider{
-		name:    opts.Name,
-		baseURL: strings.TrimRight(opts.BaseURL, "/"),
-		path:    path,
-		apiKey:  opts.APIKey,
-		headers: headers,
+		name:          opts.Name,
+		baseURL:       strings.TrimRight(opts.BaseURL, "/"),
+		path:          path,
+		responsesPath: responsesPath,
+		apiKey:        opts.APIKey,
+		tokenSource:   opts.TokenSource,
+		headers:       headers,
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -100,12 +118,30 @@ func New(opts Options) (*Provider, error) {
 	}, nil
 }
 
+func normalizePath(path, fallback string) string {
+	if path == "" {
+		path = fallback
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
 func (p *Provider) Name() string {
 	return p.name
 }
 
 func (p *Provider) ChatCompletions(ctx context.Context, req provider.Request) (*http.Response, error) {
-	endpoint := p.baseURL + p.path
+	return p.do(ctx, p.path, req)
+}
+
+func (p *Provider) Responses(ctx context.Context, req provider.Request) (*http.Response, error) {
+	return p.do(ctx, p.responsesPath, req)
+}
+
+func (p *Provider) do(ctx context.Context, path string, req provider.Request) (*http.Response, error) {
+	endpoint := p.baseURL + path
 	if req.Query != "" {
 		endpoint += "?" + req.Query
 	}
@@ -115,7 +151,22 @@ func (p *Provider) ChatCompletions(ctx context.Context, req provider.Request) (*
 		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	token := p.apiKey
+	if p.tokenSource != nil {
+		var accountID string
+		token, accountID, err = p.tokenSource.Token(ctx)
+		if err != nil {
+			return nil, &provider.Error{Kind: provider.Unavailable, Err: fmt.Errorf("resolve upstream credential: %w", err)}
+		}
+		if token == "" {
+			return nil, &provider.Error{Kind: provider.Unavailable, Err: errors.New("upstream credential is empty")}
+		}
+		if accountID != "" {
+			httpReq.Header.Set("ChatGPT-Account-Id", accountID)
+		}
+	}
+
+	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	if req.Accept != "" {
 		httpReq.Header.Set("Accept", req.Accept)

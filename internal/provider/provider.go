@@ -21,6 +21,7 @@ type Request struct {
 type Provider interface {
 	Name() string
 	ChatCompletions(ctx context.Context, req Request) (*http.Response, error)
+	Responses(ctx context.Context, req Request) (*http.Response, error)
 }
 
 type ErrorKind int

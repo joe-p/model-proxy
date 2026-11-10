@@ -4,13 +4,16 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/logging"
+	"github.com/joe-p/model-proxy/internal/pricing"
 	"github.com/joe-p/model-proxy/internal/provider"
+	"github.com/joe-p/model-proxy/internal/provider/codex"
 	"github.com/joe-p/model-proxy/internal/provider/openai"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
 	"github.com/joe-p/model-proxy/internal/server"
@@ -46,8 +49,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	pricingSvc, pricingCancel := startPricing(cfg, logger)
+	defer func() {
+		if pricingCancel != nil {
+			pricingCancel()
+		}
+	}()
 
-	srv := server.New(cfg, providers, logger)
+	srv := server.New(cfg, providers, logger, pricingSvc)
 	logger.Info("starting model-proxy",
 		"version", version,
 		"listen", cfg.Server.Listen,
@@ -70,9 +79,15 @@ func run() error {
 		select {
 		case sig := <-sigCh:
 			if sig == syscall.SIGHUP {
-				if err := reload(srv, *configPath); err != nil {
+				newCancel, err := reload(srv, *configPath)
+				if err != nil {
 					logger.Error("configuration reload failed", "error", err)
+					continue
 				}
+				if pricingCancel != nil {
+					pricingCancel()
+				}
+				pricingCancel = newCancel
 				continue
 			}
 
@@ -91,18 +106,22 @@ func run() error {
 	}
 }
 
-func reload(srv *server.Server, path string) error {
+func reload(srv *server.Server, path string) (context.CancelFunc, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	providers, err := buildProviders(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stderr)
-	if err := srv.Reload(cfg, providers, logger); err != nil {
-		return err
+	pricingSvc, pricingCancel := startPricing(cfg, logger)
+	if err := srv.Reload(cfg, providers, logger, pricingSvc); err != nil {
+		if pricingCancel != nil {
+			pricingCancel()
+		}
+		return nil, err
 	}
 	logger.Info("configuration reloaded",
 		"models", len(cfg.Models),
@@ -110,7 +129,25 @@ func reload(srv *server.Server, path string) error {
 		"keys", len(cfg.Keys),
 		"policies", len(cfg.Policies),
 	)
-	return nil
+	return pricingCancel, nil
+}
+
+// startPricing starts the optional models.dev refresh loop. The returned
+// cancel function stops it; nil means pricing is disabled.
+func startPricing(cfg *config.Config, logger *slog.Logger) (*pricing.Service, context.CancelFunc) {
+	if !cfg.Pricing.Enabled() {
+		return nil, nil
+	}
+	svc := pricing.New(pricing.Options{
+		URL:             cfg.Pricing.URL,
+		CachePath:       cfg.Pricing.Cache,
+		RefreshInterval: cfg.Pricing.RefreshInterval,
+		Timeout:         cfg.Pricing.Timeout,
+		Logger:          logger,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	svc.Start(ctx)
+	return svc, cancel
 }
 
 func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
@@ -136,6 +173,19 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				providerCfg.Name,
 				providerCfg.BaseURL,
 				providerCfg.APIKey,
+				providerCfg.DialTimeout,
+				providerCfg.ResponseHeaderTimeout,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("provider %q: %w", name, err)
+			}
+			result[name] = p
+		case "codex", "chatgpt":
+			p, err := codex.New(
+				providerCfg.Name,
+				providerCfg.BaseURL,
+				providerCfg.APIKey,
+				providerCfg.AuthDir,
 				providerCfg.DialTimeout,
 				providerCfg.ResponseHeaderTimeout,
 			)
