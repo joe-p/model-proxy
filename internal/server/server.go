@@ -182,6 +182,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if lr.usage.Cost != nil {
 			attrs = append(attrs, "cost_usd", *lr.usage.Cost)
 		}
+		if lr.usage.CacheDiscount != nil {
+			attrs = append(attrs, "cache_discount", *lr.usage.CacheDiscount)
+		}
+		if details := lr.usage.PromptTokensDetails; details != nil {
+			if details.CachedTokens != nil {
+				attrs = append(attrs, "cached_tokens", *details.CachedTokens)
+			}
+			if details.CacheWriteTokens != nil {
+				attrs = append(attrs, "cache_write_tokens", *details.CacheWriteTokens)
+			}
+		}
 	}
 
 	level := slog.LevelInfo

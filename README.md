@@ -305,8 +305,12 @@ model, stream flag, error code, and client-cancellation state. A virtual key's
 `user_agent` setting replaces the client-supplied user agent in the log entry.
 When `logging.log_usage` is enabled, the proxy observes the response body
 without changing it and adds `prompt_tokens`, `completion_tokens`,
-`total_tokens`, and `cost_usd` when available. `cost_usd` is OpenRouter's `usage.cost` (credits,
-1:1 with USD).
+`total_tokens`, and, when the upstream reports them, `cost_usd`,
+`cache_discount`, `cached_tokens`, and `cache_write_tokens`. `cost_usd` is
+OpenRouter's `usage.cost` (credits, 1:1 with USD); `cached_tokens` and
+`cache_write_tokens` come from `usage.prompt_tokens_details` and are logged as
+reported, including `0` for a cache miss. Fields the upstream omits are not
+logged at all.
 
 Secrets, prompts, and response bodies are never logged.
 

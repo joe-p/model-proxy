@@ -168,7 +168,7 @@ func TestModelsRequiresAuthAndListsSortedAliases(t *testing.T) {
 }
 
 func TestChatRewritesModelAndPassesResponseThrough(t *testing.T) {
-	const responseBody = `{"id":"chatcmpl-1","model":"openai/gpt-4o-mini","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.0001},"choices":[]}`
+	const responseBody = `{"id":"chatcmpl-1","model":"openai/gpt-4o-mini","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.0001,"cache_discount":0.00002,"prompt_tokens_details":{"cached_tokens":8,"cache_write_tokens":2}},"choices":[]}`
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls.Add(1)
@@ -249,6 +249,9 @@ func TestChatRewritesModelAndPassesResponseThrough(t *testing.T) {
 
 	waitForLog(t, logs, `"cost_usd":0.0001`)
 	waitForLog(t, logs, `"total_tokens":15`)
+	waitForLog(t, logs, `"cached_tokens":8`)
+	waitForLog(t, logs, `"cache_write_tokens":2`)
+	waitForLog(t, logs, `"cache_discount":0.00002`)
 	waitForLog(t, logs, `"alias":"fast"`)
 	waitForLog(t, logs, `"user_agent":"model-proxy-test-client/1.0"`)
 }
@@ -370,7 +373,7 @@ func TestChatRejectsOversizedBody(t *testing.T) {
 
 func TestChatStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
 	const streamBody = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
-		"data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":0.00002}}\n\n" +
+		"data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":0.00002,\"prompt_tokens_details\":{\"cached_tokens\":2,\"cache_write_tokens\":0}}}\n\n" +
 		"data: [DONE]\n\n"
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -401,6 +404,8 @@ func TestChatStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
 		t.Fatalf("content type = %q", got)
 	}
 	waitForLog(t, logs, `"cost_usd":0.00002`)
+	waitForLog(t, logs, `"cached_tokens":2`)
+	waitForLog(t, logs, `"cache_write_tokens":0`)
 	waitForLog(t, logs, `"stream":true`)
 }
 

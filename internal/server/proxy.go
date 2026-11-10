@@ -29,10 +29,19 @@ type requestLog struct {
 }
 
 type usage struct {
-	PromptTokens     int64    `json:"prompt_tokens"`
-	CompletionTokens int64    `json:"completion_tokens"`
-	TotalTokens      int64    `json:"total_tokens"`
-	Cost             *float64 `json:"cost"`
+	PromptTokens        int64                `json:"prompt_tokens"`
+	CompletionTokens    int64                `json:"completion_tokens"`
+	TotalTokens         int64                `json:"total_tokens"`
+	Cost                *float64             `json:"cost"`
+	CacheDiscount       *float64             `json:"cache_discount"`
+	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details"`
+}
+
+// promptTokensDetails carries the cache breakdown of prompt tokens. Pointers
+// distinguish "provider did not report this" from a reported zero (a miss).
+type promptTokensDetails struct {
+	CachedTokens     *int64 `json:"cached_tokens"`
+	CacheWriteTokens *int64 `json:"cache_write_tokens"`
 }
 
 var hopByHopHeaders = map[string]struct{}{
