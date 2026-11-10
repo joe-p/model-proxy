@@ -23,11 +23,21 @@ enabled = true
 [[virtual_keys]]
 name = "laptop"
 key_env = "PROXY_KEY_LAPTOP"
+# Optional: attach a named policy to restrict this key's models.
+# policy = "basic"
 
-# Add more virtual keys as needed. Every valid key may use every alias.
+# Add more virtual keys as needed. Keys without a policy may use every alias.
 # [[virtual_keys]]
 # name = "ci"
 # key_env = "PROXY_KEY_CI"
+
+# Policies restrict which model aliases a virtual key may use. mode is
+# "whitelist" (only listed aliases) or "blacklist" (all but listed aliases).
+# Model entries refer to aliases from [models.*].
+# [[policies]]
+# name = "basic"
+# mode = "whitelist"
+# models = ["fast"]
 
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"

@@ -52,6 +52,7 @@ func run() error {
 		"listen", cfg.Server.Listen,
 		"models", len(cfg.Models),
 		"providers", len(cfg.Providers),
+		"policies", len(cfg.Policies),
 		"env_file", cfg.EnvFile,
 	)
 
@@ -106,6 +107,7 @@ func reload(srv *server.Server, path string) error {
 		"models", len(cfg.Models),
 		"providers", len(cfg.Providers),
 		"keys", len(cfg.Keys),
+		"policies", len(cfg.Policies),
 	)
 	return nil
 }

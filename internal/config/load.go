@@ -16,6 +16,7 @@ type rawConfig struct {
 	Logging     rawLogging             `toml:"logging"`
 	Auth        *rawAuth               `toml:"auth"`
 	VirtualKeys []rawVirtualKey        `toml:"virtual_keys"`
+	Policies    []rawPolicy            `toml:"policies"`
 	Providers   map[string]rawProvider `toml:"providers"`
 	Models      map[string]rawModel    `toml:"models"`
 }
@@ -40,6 +41,13 @@ type rawAuth struct {
 type rawVirtualKey struct {
 	Name   string `toml:"name"`
 	KeyEnv string `toml:"key_env"`
+	Policy string `toml:"policy"`
+}
+
+type rawPolicy struct {
+	Name   string   `toml:"name"`
+	Mode   string   `toml:"mode"`
+	Models []string `toml:"models"`
 }
 
 type rawProvider struct {

@@ -12,6 +12,7 @@ import (
 func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, error) {
 	cfg := &Config{
 		EnvFile:   envPath,
+		Policies:  make(map[string]PolicyConfig, len(raw.Policies)),
 		Providers: make(map[string]ProviderConfig, len(raw.Providers)),
 		Models:    make(map[string]ModelConfig, len(raw.Models)),
 	}
@@ -95,7 +96,11 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		}
 		keyNames[name] = struct{}{}
 		keyValues[key] = name
-		cfg.Keys = append(cfg.Keys, VirtualKey{Name: name, Key: key})
+		cfg.Keys = append(cfg.Keys, VirtualKey{
+			Name:   name,
+			Key:    key,
+			Policy: strings.TrimSpace(rawKey.Policy),
+		})
 	}
 	if cfg.Auth.Enabled && len(cfg.Keys) == 0 {
 		return nil, fmt.Errorf("auth is enabled but no virtual keys are configured")
@@ -163,6 +168,44 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 	}
 	if len(cfg.Models) == 0 {
 		return nil, fmt.Errorf("at least one model must be configured")
+	}
+
+	for i, rawPolicy := range raw.Policies {
+		name := strings.TrimSpace(rawPolicy.Name)
+		if name == "" {
+			return nil, fmt.Errorf("policies[%d].name must not be empty", i)
+		}
+		if _, exists := cfg.Policies[name]; exists {
+			return nil, fmt.Errorf("duplicate policy name %q", name)
+		}
+		mode := strings.ToLower(strings.TrimSpace(rawPolicy.Mode))
+		if mode != PolicyWhitelist && mode != PolicyBlacklist {
+			return nil, fmt.Errorf("policy %q: mode must be %q or %q", name, PolicyWhitelist, PolicyBlacklist)
+		}
+		if len(rawPolicy.Models) == 0 {
+			return nil, fmt.Errorf("policy %q: models must not be empty", name)
+		}
+		models := make(map[string]struct{}, len(rawPolicy.Models))
+		for j, value := range rawPolicy.Models {
+			alias := strings.TrimSpace(value)
+			if alias == "" {
+				return nil, fmt.Errorf("policy %q: models[%d] must not be empty", name, j)
+			}
+			if _, ok := cfg.Models[alias]; !ok {
+				return nil, fmt.Errorf("policy %q references unknown model %q", name, alias)
+			}
+			models[alias] = struct{}{}
+		}
+		cfg.Policies[name] = PolicyConfig{Name: name, Mode: mode, Models: models}
+	}
+
+	for _, key := range cfg.Keys {
+		if key.Policy == "" {
+			continue
+		}
+		if _, ok := cfg.Policies[key.Policy]; !ok {
+			return nil, fmt.Errorf("virtual key %q references unknown policy %q", key.Name, key.Policy)
+		}
 	}
 
 	return cfg, nil

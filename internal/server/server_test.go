@@ -454,3 +454,97 @@ func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
 		t.Fatal("expected listener change to be rejected")
 	}
 }
+
+func TestPoliciesRestrictChatAndModelListing(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		cfg.Keys = []config.VirtualKey{
+			{Name: "allow-fast", Key: "allow-fast-key", Policy: "only-fast"},
+			{Name: "deny-fast", Key: "deny-fast-key", Policy: "no-fast"},
+		}
+		cfg.Policies = map[string]config.PolicyConfig{
+			"only-fast": {Name: "only-fast", Mode: config.PolicyWhitelist, Models: map[string]struct{}{"fast": {}}},
+			"no-fast":   {Name: "no-fast", Mode: config.PolicyBlacklist, Models: map[string]struct{}{"fast": {}}},
+		}
+	})
+
+	// Whitelisted alias succeeds.
+	resp := postChat(t, proxy.URL, "allow-fast-key", `{"model":"fast","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("whitelisted status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	// Alias outside the whitelist is rejected before reaching upstream.
+	resp = postChat(t, proxy.URL, "allow-fast-key", `{"model":"smart","messages":[]}`)
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("non-whitelisted status = %d, body = %s", resp.StatusCode, body)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if envelope.Error.Code != "model_not_allowed" {
+		t.Fatalf("error code = %q", envelope.Error.Code)
+	}
+
+	// Blacklisted alias is rejected, other aliases are allowed.
+	resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"fast","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("blacklisted status = %d", resp.StatusCode)
+	}
+	resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"smart","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("non-blacklisted status = %d", resp.StatusCode)
+	}
+	if got := upstreamCalls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+
+	// /v1/models lists only the aliases each key may use.
+	for key, want := range map[string][]string{
+		"allow-fast-key": {"fast"},
+		"deny-fast-key":  {"smart"},
+	} {
+		req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET models: %v", err)
+		}
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			t.Fatalf("decode models: %v", err)
+		}
+		resp.Body.Close()
+		if len(payload.Data) != len(want) {
+			t.Fatalf("%s models = %+v, want %v", key, payload.Data, want)
+		}
+		for i, id := range want {
+			if payload.Data[i].ID != id {
+				t.Fatalf("%s models = %+v, want %v", key, payload.Data, want)
+			}
+		}
+	}
+}

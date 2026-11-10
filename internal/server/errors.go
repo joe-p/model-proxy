@@ -63,6 +63,15 @@ func errModelNotFound() *apiError {
 	}
 }
 
+func errModelNotAllowed() *apiError {
+	return &apiError{
+		Status:  http.StatusForbidden,
+		Type:    "invalid_request_error",
+		Code:    "model_not_allowed",
+		Message: "Model is not allowed for this API key",
+	}
+}
+
 func errInvalidRequest(message string) *apiError {
 	return &apiError{
 		Status:  http.StatusBadRequest,

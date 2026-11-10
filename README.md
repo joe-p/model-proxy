@@ -12,6 +12,7 @@ provider.
 - `GET /healthz` liveness endpoint.
 - TOML configuration with strict unknown-field rejection.
 - Virtual keys loaded from environment variables, with optional `.env` support.
+- Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-agnostic interface; the only implementation is OpenRouter.
 - Transparent upstream response bodies and SSE streams.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
@@ -84,6 +85,13 @@ enabled = true
 [[virtual_keys]]
 name = "laptop"
 key_env = "PROXY_KEY_LAPTOP"
+policy = "basic"          # optional
+
+# Optional: restrict which model aliases a key may use.
+[[policies]]
+name = "basic"
+mode = "whitelist"        # whitelist | blacklist
+models = ["fast"]
 
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"
@@ -106,6 +114,11 @@ Rules:
 - Virtual keys use `key_env` only; plaintext `key` fields are rejected.
 - `auth.enabled` defaults to `true`. If auth is enabled, at least one virtual
   key must resolve to a non-empty value.
+- A virtual key's `policy` is optional. Keys without a policy may use every
+  alias.
+- Policies require a non-empty `name`, a `mode` of `whitelist` or `blacklist`,
+  and a non-empty `models` list of configured aliases. Policy names must be
+  unique, and every key `policy` reference must exist.
 - Unknown TOML fields, duplicate key names, duplicate resolved key values,
   missing environment variables, invalid URLs, and zero models fail startup.
 - `[server].listen` and `read_header_timeout` changes require a restart; other
@@ -116,6 +129,11 @@ Rules:
 Clients send the alias in `model`. The proxy rewrites only that field to the
 configured `upstream` before calling OpenRouter. Alias names are exact and
 case-sensitive. Unlisted names return `404 model_not_found`.
+
+A key with a `whitelist` policy may use only the listed aliases. A key with a
+`blacklist` policy may use every alias except those listed. Using a disallowed
+alias returns `403 model_not_allowed` and the request is not sent upstream.
+`GET /v1/models` is filtered to the aliases allowed by the authenticated key.
 
 Requests containing `models`, `route`, or `plugins` are rejected with `400`.
 Those OpenRouter fields can bypass the alias registry or add paid features.
@@ -144,6 +162,7 @@ untouched. There are no proxy-level retries or fallbacks.
 | Condition | Status | Code |
 | --- | --- | --- |
 | Missing/invalid virtual key | 401 | `invalid_api_key` |
+| Alias disallowed by the key's policy | 403 | `model_not_allowed` |
 | Unknown alias | 404 | `model_not_found` |
 | Malformed JSON or forbidden field | 400 | `invalid_request` |
 | Body over `max_body_bytes` | 413 | `request_too_large` |

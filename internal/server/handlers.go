@@ -30,16 +30,20 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st := stateFrom(r.Context())
-	keyName, ok := auth.Authenticate(r, st.cfg.Auth.Enabled, st.cfg.Keys)
+	key, ok := auth.Authenticate(r, st.cfg.Auth.Enabled, st.cfg.Keys)
 	if !ok {
 		writeAPIError(w, lr, errInvalidAPIKey())
 		return
 	}
-	lr.keyName = keyName
+	if key != nil {
+		lr.keyName = key.Name
+	}
 
 	aliases := make([]string, 0, len(st.cfg.Models))
 	for alias := range st.cfg.Models {
-		aliases = append(aliases, alias)
+		if st.cfg.ModelAllowed(key, alias) {
+			aliases = append(aliases, alias)
+		}
 	}
 	sort.Strings(aliases)
 
@@ -81,12 +85,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	st := stateFrom(r.Context())
 	cfg := st.cfg
 
-	keyName, ok := auth.Authenticate(r, cfg.Auth.Enabled, cfg.Keys)
+	key, ok := auth.Authenticate(r, cfg.Auth.Enabled, cfg.Keys)
 	if !ok {
 		writeAPIError(w, lr, errInvalidAPIKey())
 		return
 	}
-	lr.keyName = keyName
+	if key != nil {
+		lr.keyName = key.Name
+	}
 
 	body, err := readRequestBody(w, r, cfg.Server.MaxBodyBytes)
 	if err != nil {
@@ -130,6 +136,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	model, exists := cfg.Models[alias]
 	if !exists {
 		writeAPIError(w, lr, errModelNotFound())
+		return
+	}
+	if !cfg.ModelAllowed(key, alias) {
+		writeAPIError(w, lr, errModelNotAllowed())
 		return
 	}
 

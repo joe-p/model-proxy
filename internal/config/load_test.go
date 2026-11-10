@@ -242,3 +242,143 @@ func TestLoadRejectsMissingEnvFile(t *testing.T) {
 		t.Fatalf("expected env file error, got %v", err)
 	}
 }
+
+func TestLoadResolvesPoliciesAndKeyReferences(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.toml", `
+[[virtual_keys]]
+name = "laptop"
+key_env = "PROXY_KEY"
+policy = "basic"
+[[virtual_keys]]
+name = "unrestricted"
+key_env = "PROXY_KEY_2"
+
+[[policies]]
+name = "basic"
+mode = "whitelist"
+models = ["fast"]
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+
+[models.smart]
+provider = "openrouter"
+upstream = "anthropic/claude-sonnet-4"
+`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("PROXY_KEY_2", "secret-2")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	policy := cfg.Policies["basic"]
+	if policy.Name != "basic" || policy.Mode != PolicyWhitelist {
+		t.Fatalf("unexpected policy: %+v", policy)
+	}
+	if _, ok := policy.Models["fast"]; !ok {
+		t.Fatalf("policy models missing fast: %+v", policy.Models)
+	}
+	if cfg.Keys[0].Policy != "basic" || cfg.Keys[1].Policy != "" {
+		t.Fatalf("unexpected key policies: %+v", cfg.Keys)
+	}
+	if !cfg.ModelAllowed(&cfg.Keys[0], "fast") {
+		t.Fatal("whitelisted model should be allowed")
+	}
+	if cfg.ModelAllowed(&cfg.Keys[0], "smart") {
+		t.Fatal("non-whitelisted model should be denied")
+	}
+	if !cfg.ModelAllowed(&cfg.Keys[1], "smart") {
+		t.Fatal("key without policy should allow every model")
+	}
+}
+
+func TestLoadRejectsUnknownPolicyReference(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.toml", `
+[[virtual_keys]]
+name = "laptop"
+key_env = "PROXY_KEY"
+policy = "missing"
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "unknown policy") {
+		t.Fatalf("expected unknown policy error, got %v", err)
+	}
+}
+
+func TestLoadRejectsUnknownModelInPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.toml", `
+[auth]
+enabled = false
+
+[[policies]]
+name = "basic"
+mode = "blacklist"
+models = ["missing"]
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "unknown model") {
+		t.Fatalf("expected unknown model error, got %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidPolicy(t *testing.T) {
+	tests := []struct {
+		name   string
+		policy string
+		want   string
+	}{
+		{name: "mode", policy: "name = \"p\"\nmode = \"allow\"\nmodels = [\"fast\"]", want: "mode"},
+		{name: "empty models", policy: "name = \"p\"\nmode = \"whitelist\"\nmodels = []", want: "models"},
+		{name: "duplicate name", policy: "name = \"p\"\nmode = \"whitelist\"\nmodels = [\"fast\"]\n[[policies]]\nname = \"p\"\nmode = \"blacklist\"\nmodels = [\"fast\"]", want: "duplicate policy"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeFile(t, dir, "config.toml", "[auth]\nenabled = false\n\n[[policies]]\n"+tc.policy+"\n"+`
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+`)
+			t.Setenv("OPENROUTER_KEY", "upstream")
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
