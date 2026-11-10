@@ -23,6 +23,7 @@ type requestLog struct {
 	provider       string
 	billingMode    string
 	upstream       string
+	passthrough    bool
 	stream         bool
 	errorCode      string
 	errorDetail    string
@@ -30,6 +31,7 @@ type requestLog struct {
 	usage          *usage
 	estimatedCost  *float64
 	pricingSource  string
+	droppedFields  []string
 }
 
 type usage struct {
@@ -96,10 +98,12 @@ func copyResponseHeaders(dst, src http.Header) {
 	}
 }
 
-// copyJSON forwards the body, optionally normalizing usage metadata to the
-// OpenRouter shape and observing it after the copy completes.
-func copyJSON(dst io.Writer, src io.Reader, parseUsage, normalize bool) (*usage, error) {
-	if !parseUsage && !normalize {
+// copyJSON forwards the body after normalizing usage metadata to the OpenRouter
+// shape and injecting a derived cost, observing usage for the access log. Usage
+// is observed before normalization so the log keeps the provider-reported cost
+// rather than the injected estimate.
+func copyJSON(dst io.Writer, src io.Reader, parseUsage bool, cost openroutercompat.CostFunc) (*usage, error) {
+	if !parseUsage && cost == nil {
 		_, err := io.Copy(dst, src)
 		return nil, err
 	}
@@ -108,11 +112,9 @@ func copyJSON(dst io.Writer, src io.Reader, parseUsage, normalize bool) (*usage,
 	if err != nil {
 		return nil, err
 	}
-	if normalize {
-		normalized, changed, normalizeErr := openroutercompat.NormalizeChatCompletion(body)
-		if normalizeErr == nil && changed {
-			body = normalized
-		}
+	reported := usageFromJSONBytes(body)
+	if normalized, changed, normalizeErr := openroutercompat.NormalizeChatCompletion(body, cost); normalizeErr == nil && changed {
+		body = normalized
 	}
 	if _, err := dst.Write(body); err != nil {
 		return nil, err
@@ -120,12 +122,25 @@ func copyJSON(dst io.Writer, src io.Reader, parseUsage, normalize bool) (*usage,
 	if !parseUsage {
 		return nil, nil
 	}
+	observed := usageFromJSONBytes(body)
+	if observed == nil {
+		return nil, nil
+	}
+	// Keep the access log on provider-reported costs: an injected estimate is
+	// logged by applyEstimatedCost instead so pricing_source stays accurate.
+	if reported == nil || reported.Cost == nil {
+		observed.Cost = nil
+	}
+	return observed, nil
+}
 
+// usageFromJSONBytes reads the usage object of a buffered chat response.
+func usageFromJSONBytes(body []byte) *usage {
 	var envelope struct {
 		Usage *usage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, nil
+		return nil
 	}
-	return envelope.Usage, nil
+	return envelope.Usage
 }

@@ -4,6 +4,8 @@
 package codex
 
 import (
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/joe-p/model-proxy/internal/codexauth"
@@ -19,7 +21,10 @@ type Provider = openaicompat.Provider
 // New returns a Codex provider. When apiKey is empty, credentials are resolved
 // from authDir (or $CODEX_HOME / ~/.codex when authDir is empty) on every
 // request. A configured apiKey is used as a static token instead.
-func New(name, baseURL, apiKey, authDir string, dialTimeout, responseHeaderTimeout time.Duration) (*Provider, error) {
+//
+// clientVersion is required by the Codex model listing endpoint. When empty,
+// the provider still serves chat and responses; only model discovery fails.
+func New(name, baseURL, apiKey, authDir, clientVersion string, dialTimeout, responseHeaderTimeout time.Duration) (*Provider, error) {
 	headers := map[string]string{
 		"originator": DefaultOriginator,
 	}
@@ -30,6 +35,7 @@ func New(name, baseURL, apiKey, authDir string, dialTimeout, responseHeaderTimeo
 		DialTimeout:           dialTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		Headers:               headers,
+		ModelsQuery:           modelsQuery(clientVersion),
 	}
 	if apiKey == "" {
 		opts.TokenSource = codexauth.New(codexauth.Options{Dir: authDir})
@@ -37,4 +43,14 @@ func New(name, baseURL, apiKey, authDir string, dialTimeout, responseHeaderTimeo
 		headers["ChatGPT-Account-Id"] = accountID
 	}
 	return openaicompat.New(opts)
+}
+
+// modelsQuery builds the client_version parameter the Codex model listing
+// requires.
+func modelsQuery(clientVersion string) string {
+	clientVersion = strings.TrimSpace(clientVersion)
+	if clientVersion == "" {
+		return ""
+	}
+	return "client_version=" + url.QueryEscape(clientVersion)
 }

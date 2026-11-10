@@ -9,10 +9,16 @@ one or more upstream providers.
 
 ## Features
 
-- `POST /v1/chat/completions`, streaming and non-streaming.
+- `POST /v1/chat/completions`, streaming and non-streaming, with OpenRouter's
+  usage shape and cost fields.
+- `POST /api/v1/chat/completions`, `/api/v1/responses`, and `/api/v1/models`
+  aliases for clients that hardcode OpenRouter's base URL.
 - `POST /v1/responses` for Responses-native clients such as Codex, streaming
   and non-streaming, with transparent response passthrough.
-- `GET /v1/models` backed by a strict alias registry.
+- `GET /v1/models` backed by a strict alias registry, optionally merged with
+  models discovered from providers that allow passthrough.
+- OpenRouter-compatible by default: OpenRouter-shaped model listings, usage
+  costs, error envelopes, request-field tolerance, path aliases, and CORS.
 - `GET /healthz` liveness endpoint.
 - JWCC configuration (JSON with comments and trailing commas) with strict
   unknown-field rejection.
@@ -200,12 +206,17 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
     // ChatGPT/Codex subscription credentials from the OpenAI Codex CLI.
     // Reads <auth_dir>/auth.json and refreshes expired access tokens. Without
     // auth_dir, $CODEX_HOME or ~/.codex is used.
+    // passthrough_models forwards model ids that are not listed below; the
+    // upstream model listing then needs a client_version, which defaults to
+    // latest_version in <auth_dir>/version.json.
     // "codex": {
     //   "type": "codex",
     //   "base_url": "https://chatgpt.com/backend-api/codex",
     //   "auth_dir": "~/.codex",
     //   "billing_mode": "subscription",
     //   "pricing_provider": "openai",
+    //   "passthrough_models": true,
+    //   "client_version": "0.167.0",
     // },
   },
 
@@ -352,7 +363,8 @@ API-equivalent list price for the same tokens; it is not a subscription charge.
 
 Clients send the alias in `model`. The proxy rewrites only that field to the
 configured `upstream` before calling the provider. Alias names are exact and
-case-sensitive. Unlisted names return `404 model_not_found`.
+case-sensitive. Unlisted names return `404 model_not_found`, unless a provider
+allows [passthrough models](#passthrough-models).
 
 A key with a `whitelist` policy may use only the listed aliases. A key with a
 `blacklist` policy may use every alias except those listed. Using a disallowed
@@ -363,6 +375,49 @@ Requests containing `models`, `route`, or `plugins` are rejected with `400`.
 Those OpenRouter fields can bypass the alias registry or add paid features.
 Other fields, including `provider` and `transforms`, are passed through
 untouched. There are no proxy-level retries or fallbacks.
+
+### Passthrough models
+
+Set `passthrough_models` on a provider to accept model ids that are not listed
+under `models`. The requested id is sent upstream unchanged, so a new upstream
+model needs no config change:
+
+```jsonc
+"codex": {
+  "type": "codex",
+  "base_url": "https://chatgpt.com/backend-api/codex",
+  "auth_dir": "~/.codex",
+  "passthrough_models": true
+}
+```
+
+With that config, `{"model": "gpt-5.6-sol"}` is forwarded to the Codex backend
+as `gpt-5.6-sol`. Configured aliases always win over passthrough, so keep using
+an alias when you want a stable name or request-body overrides.
+
+- **One provider only.** An unlisted id is routed to the single provider with
+  `passthrough_models` enabled. If several providers enable it, the id is
+  ambiguous and the request fails with `400 invalid_request` naming the
+  candidates; add the model to `models` to choose one.
+- **Policies still apply.** A `whitelist` key may only use the names it lists, so
+  it cannot use passthrough ids. A `blacklist` key may use passthrough ids it
+  does not list. Passthrough requests are logged with `"passthrough": true`,
+  and the alias equals the upstream model id.
+- **Provider defaults apply.** Provider-level `extra_body`, `billing_mode`, and
+  `pricing_provider` are used. Model-level `extra_body` and `pricing` overrides
+  require a configured alias.
+- **`GET /v1/models` includes discovered ids.** For each passthrough provider the
+  proxy asks the upstream for its model list and merges it with the aliases,
+  honoring the authenticated key's policy. Results are cached for one minute and
+  cleared on `SIGHUP`; a failing or unsupported listing is logged and skipped, so
+  the aliases are still returned.
+
+The proxy lists models with `GET <base_url>/models`, reading either
+`{"data":[{"id":"..."}]}` (OpenAI, OpenRouter) or `{"models":[{"slug":"..."}]}`
+(Codex). The Codex endpoint requires a client version, so a codex provider sends
+`client_version` from this file, or from `latest_version` in
+`<auth_dir>/version.json` when unset. `client_version` is rejected on other
+provider types.
 
 ### Extra request-body fields
 
@@ -418,6 +473,10 @@ These are request-body fields, not HTTP headers. OpenRouter reads
 - `X-Model-Proxy-Alias` and `X-Model-Proxy-Upstream` describe the selected
   route. `X-Request-ID` is accepted from the client if valid, otherwise
   generated, forwarded upstream, echoed to the client, and included in logs.
+- Errors are OpenRouter-shaped: proxy-generated errors use
+  `{"error":{"message","code":<int>,"type","metadata":{"proxy_code"}}}` and
+  upstream failures are rewritten into the same envelope with
+  `metadata.provider_name`.
 - Client headers forwarded upstream are limited to `Content-Type`, `Accept`, and
   a sanitized `X-Request-ID`. The proxy sets `Authorization`,
   `Content-Type: application/json`, and optional attribution headers.
@@ -425,7 +484,50 @@ These are request-body fields, not HTTP headers. OpenRouter reads
   `Content-Length`, `Set-Cookie`, and proxy-owned headers.
 - Automatic transport compression is disabled so response bytes are never
   silently decompressed.
-- There is no CORS support and no upstream model-catalog call.
+- CORS is enabled for browser clients. The proxy never proxies a client's
+  catalog request for routing; the only catalog reads are the models.dev pricing
+  cache and passthrough model discovery.
+
+### OpenRouter compatibility
+
+model-proxy always presents the OpenRouter client contract, for every provider.
+There is no setting to turn it off: clients written against OpenRouter keep
+working when the base URL points at the proxy.
+
+| Surface | Behavior |
+| --- | --- |
+| `GET /v1/models` | OpenRouter model objects: `id`, `canonical_slug`, `name`, `created`, `context_length`, `architecture`, `pricing`, `top_provider`, `supported_parameters`, plus `total_count` |
+| Chat usage | `cost`, `is_byok`, and `cost_details` for API-billed providers |
+| Errors | `{"error":{"message","code":<int>,"type","metadata":{"provider_name","proxy_code"}}}`; upstream error bodies are rewritten |
+| Request fields | `models`, `route`, `plugins`, and `transforms` are dropped and logged as `dropped_fields` instead of rejected |
+| Paths | `/api/v1/chat/completions`, `/api/v1/responses`, and `/api/v1/models` serve the same handlers |
+| CORS | `Access-Control-Allow-*` headers and `OPTIONS` preflight |
+
+Model metadata for the listing comes from the pricing catalog, keyed by the
+provider's `pricing_provider` and the model's `upstream` id. Explicit model
+`pricing` in the config wins over the catalog. Models the catalog does not know
+are listed without `pricing` and with a minimal architecture rather than
+invented numbers. `supported_parameters` is conservative: it reports `tools`
+and reasoning parameters only when the catalog confirms them, and omits
+`temperature`/`top_p`/`seed` for Codex-style backends that reject them.
+
+Cost injection follows the billing mode:
+
+- **Provider reported a cost** (OpenRouter): the reported `usage.cost` and
+  `cost_details` are passed through untouched.
+- **API-billed provider** (`billing_mode` empty or not `subscription`): `cost`
+  is derived from the model's catalog rates, or from the model's configured
+  `pricing`, and reported in OpenRouter's `cost_details` shape. The access log
+  keeps `estimated_api_cost_usd` and `pricing_source` so an estimate is never
+  presented as a charge.
+- **Subscription provider** (`billing_mode: "subscription"`, such as Codex): no
+  cost fields are injected, because a subscription has no per-token price.
+
+Request fields the proxy cannot honor are dropped rather than forwarded:
+`models` (fallback list), `route`, `plugins`, and `transforms` would either
+bypass the alias registry or add paid features. Each drop is logged in
+`dropped_fields`. Responses API bodies and streams are not rewritten; only its
+errors follow the OpenRouter envelope.
 
 ### OpenRouter-compatible usage output
 
@@ -440,9 +542,11 @@ buffered and streaming responses:
 | `completion_tokens_details.reasoning_tokens` | top-level `reasoning_tokens` |
 | `total_tokens` | `prompt_tokens + completion_tokens` when omitted |
 
-Existing values are never overridden. model-proxy does not invent `cost`,
-`cost_details`, `cache_discount`, or cache counters that the provider did not
-report. Private AI Gateway already reports `cost`, standard token counters, and
+Existing values are never overridden. Costs are handled separately: a
+provider-reported `cost` always wins, API-billed providers get a catalog-derived
+`cost` and `cost_details`, and subscription providers get none. model-proxy never
+invents `cache_discount` or cache counters that the provider did not report.
+Private AI Gateway already reports `cost`, standard token counters, and
 `cached_tokens`, so those pass through.
 
 For streaming requests to non-OpenRouter providers, model-proxy also sets
@@ -549,7 +653,8 @@ the amount charged to a subscription.
 | Missing/invalid virtual key | 401 | `invalid_api_key` |
 | Alias disallowed by the key's policy | 403 | `model_not_allowed` |
 | Unknown alias | 404 | `model_not_found` |
-| Malformed JSON or forbidden field | 400 | `invalid_request` |
+| Malformed JSON | 400 | `invalid_request` |
+| Unlisted model with several passthrough providers | 400 | `invalid_request` |
 | Body over `max_body_bytes` | 413 | `request_too_large` |
 | Upstream unreachable | 502 | `upstream_unavailable` |
 | Upstream response-header timeout | 504 | `upstream_timeout` |
@@ -557,7 +662,10 @@ the amount charged to a subscription.
 | Unknown path | 404 | `not_found` |
 | Wrong method | 405 | `method_not_allowed` |
 
-Upstream 4xx/5xx responses are returned with their original status and body.
+Codes above are reported in `metadata.proxy_code`; `error.code` carries the
+HTTP status as an integer, matching OpenRouter. Upstream 4xx/5xx responses keep
+their status but their body is rewritten into the same envelope with
+`metadata.provider_name` and `metadata.upstream_status`.
 
 ### Logging
 

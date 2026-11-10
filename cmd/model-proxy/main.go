@@ -196,6 +196,7 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				providerCfg.BaseURL,
 				providerCfg.APIKey,
 				providerCfg.AuthDir,
+				providerCfg.ClientVersion,
 				providerCfg.DialTimeout,
 				providerCfg.ResponseHeaderTimeout,
 			)

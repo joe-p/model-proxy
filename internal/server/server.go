@@ -23,12 +23,86 @@ type state struct {
 type stateKey struct{}
 type logRecordKey struct{}
 
+const (
+	// modelDiscoveryTimeout bounds a single upstream model listing.
+	modelDiscoveryTimeout = 10 * time.Second
+	// modelDiscoveryTTL is how long discovered model ids are reused before the
+	// upstream is asked again. Failures are cached for the same period so a
+	// broken upstream is not probed on every /v1/models call.
+	modelDiscoveryTTL = time.Minute
+)
+
+type discoveredModels struct {
+	ids     []string
+	expires time.Time
+}
+
+// modelsCache holds the upstream model ids reported by passthrough providers.
+// It is keyed by provider name and cleared whenever the configuration reloads.
+type modelsCache struct {
+	mu      sync.Mutex
+	entries map[string]discoveredModels
+}
+
+func (c *modelsCache) get(name string) ([]string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[name]
+	if !ok || time.Now().After(entry.expires) {
+		return nil, false
+	}
+	return entry.ids, true
+}
+
+func (c *modelsCache) put(name string, ids []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]discoveredModels)
+	}
+	c.entries[name] = discoveredModels{ids: ids, expires: time.Now().Add(modelDiscoveryTTL)}
+}
+
+func (c *modelsCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+}
+
 type Server struct {
 	state      atomic.Pointer[state]
 	mux        *http.ServeMux
 	httpServer *http.Server
 	startedAt  time.Time
 	reloadMu   sync.Mutex
+	models     modelsCache
+}
+
+// passthroughModels returns the upstream model ids a passthrough provider
+// advertises, consulting the cache first.
+func (s *Server) passthroughModels(ctx context.Context, st *state, providerName string) []string {
+	if ids, ok := s.models.get(providerName); ok {
+		return ids
+	}
+
+	lister, ok := st.providers[providerName].(provider.ModelLister)
+	if !ok {
+		st.logger.Warn("model discovery is not supported by provider", "provider", providerName)
+		s.models.put(providerName, nil)
+		return nil
+	}
+
+	discoveryCtx, cancel := context.WithTimeout(ctx, modelDiscoveryTimeout)
+	defer cancel()
+	ids, err := lister.Models(discoveryCtx)
+	if err != nil {
+		st.logger.Warn("model discovery failed", "provider", providerName, "error", err)
+		s.models.put(providerName, nil)
+		return nil
+	}
+	st.logger.Debug("model discovery succeeded", "provider", providerName, "models", len(ids))
+	s.models.put(providerName, ids)
+	return ids
 }
 
 func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator) *Server {
@@ -43,9 +117,13 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
 
 	s.mux = http.NewServeMux()
-	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
-	s.mux.HandleFunc("/v1/responses", s.handleResponses)
-	s.mux.HandleFunc("/v1/models", s.handleModels)
+	// OpenRouter clients often carry the https://openrouter.ai/api/v1 base URL,
+	// so the same handlers serve /api/v1/* as aliases.
+	for _, prefix := range []string{"/v1", "/api/v1"} {
+		s.mux.HandleFunc(prefix+"/chat/completions", s.handleChatCompletions)
+		s.mux.HandleFunc(prefix+"/responses", s.handleResponses)
+		s.mux.HandleFunc(prefix+"/models", s.handleModels)
+	}
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/", s.handleNotFound)
 
@@ -56,6 +134,15 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	return s
+}
+
+// applyCORSHeaders exposes the proxy to browser-based OpenRouter clients.
+func applyCORSHeaders(header http.Header) {
+	header.Set("Access-Control-Allow-Origin", "*")
+	header.Set("Access-Control-Expose-Headers", "X-Request-ID, X-Model-Proxy-Alias, X-Model-Proxy-Upstream")
+	header.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID, HTTP-Referer, X-Title")
+	header.Set("Access-Control-Max-Age", "600")
 }
 
 func (s *Server) ListenAndServe() error {
@@ -94,6 +181,7 @@ func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provid
 	if logger == nil {
 		logger = old.logger
 	}
+	s.models.clear()
 	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
 	return nil
 }
@@ -109,6 +197,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("X-Request-ID", lr.requestID)
+	applyCORSHeaders(w.Header())
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	ctx := context.WithValue(r.Context(), stateKey{}, st)
 	ctx = context.WithValue(ctx, logRecordKey{}, lr)
@@ -165,6 +258,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if lr.upstream != "" {
 		attrs = append(attrs, "upstream_model", lr.upstream)
+	}
+	if lr.passthrough {
+		attrs = append(attrs, "passthrough", true)
+	}
+	if len(lr.droppedFields) > 0 {
+		attrs = append(attrs, "dropped_fields", lr.droppedFields)
 	}
 	if lr.stream {
 		attrs = append(attrs, "stream", true)

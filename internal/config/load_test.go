@@ -935,3 +935,159 @@ func decodeExtraBody(t *testing.T, value map[string]json.RawMessage) map[string]
 	}
 	return decoded
 }
+
+func TestLoadResolvesPassthroughModels(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "passthrough_models": true,
+      "client_version": "0.167.0"
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("OPENROUTER_KEY", "key")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Providers["codex"].PassthroughModels {
+		t.Fatal("codex passthrough not enabled")
+	}
+	if cfg.Providers["openrouter"].PassthroughModels {
+		t.Fatal("openrouter passthrough should default to false")
+	}
+	if got := cfg.Providers["codex"].ClientVersion; got != "0.167.0" {
+		t.Fatalf("client version = %q", got)
+	}
+	if names := cfg.PassthroughProviderNames(); len(names) != 1 || names[0] != "codex" {
+		t.Fatalf("passthrough providers = %v, want [codex]", names)
+	}
+}
+
+func TestLoadRejectsClientVersionForNonCodexProvider(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "custom": {
+      "type": "openai-compatible",
+      "base_url": "https://example.test/v1",
+      "api_key_env": "CUSTOM_KEY",
+      "client_version": "1.2.3"
+    }
+  },
+  "models": {
+    "m": {"provider": "custom", "upstream": "m"}
+  }
+}`)
+	t.Setenv("CUSTOM_KEY", "key")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "client_version") {
+		t.Fatalf("expected client_version error, got %v", err)
+	}
+}
+
+func TestLoadCodexClientVersionDefaultsToCLIVersionFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "version.json"), []byte(`{"latest_version":"0.171.0","dismissed_version":null}`), 0o600); err != nil {
+		t.Fatalf("write version.json: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "codex": {
+      "type": "codex",
+      "base_url": "https://chatgpt.com/backend-api/codex",
+      "passthrough_models": true
+    }
+  },
+  "models": {
+    "gpt": {"provider": "codex", "upstream": "gpt-5"}
+  }
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["codex"].ClientVersion; got != "0.171.0" {
+		t.Fatalf("client version = %q, want 0.171.0", got)
+	}
+}
+
+func TestLoadPassthroughProvidersAreSorted(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "zeta": {
+      "type": "openai-compatible",
+      "base_url": "https://zeta.test/v1",
+      "api_key_env": "ZETA_KEY",
+      "passthrough_models": true
+    },
+    "alpha": {
+      "type": "openai-compatible",
+      "base_url": "https://alpha.test/v1",
+      "api_key_env": "ALPHA_KEY",
+      "passthrough_models": true
+    }
+  },
+  "models": {
+    "m": {"provider": "zeta", "upstream": "m"}
+  }
+}`)
+	t.Setenv("ZETA_KEY", "zeta")
+	t.Setenv("ALPHA_KEY", "alpha")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	names := cfg.PassthroughProviderNames()
+	if len(names) != 2 || names[0] != "alpha" || names[1] != "zeta" {
+		t.Fatalf("passthrough providers = %v, want [alpha zeta]", names)
+	}
+}
+
+func TestLoadRejectsRetiredCompatibilityBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "compatibility": {"openrouter": false},
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "key")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "compatibility") {
+		t.Fatalf("expected unknown-field error for compatibility, got %v", err)
+	}
+}

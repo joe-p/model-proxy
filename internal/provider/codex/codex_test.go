@@ -73,7 +73,7 @@ func TestProviderUsesCodexAuthFile(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := codex.New("codex", upstream.URL+"/backend-api/codex", "", dir, time.Second, time.Second)
+	p, err := codex.New("codex", upstream.URL+"/backend-api/codex", "", dir, "", time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestProviderResponsesUsesCodexResponsesPath(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := codex.New("codex", upstream.URL+"/backend-api/codex", "", dir, time.Second, time.Second)
+	p, err := codex.New("codex", upstream.URL+"/backend-api/codex", "", dir, "", time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestProviderStaticAPIKeyTakesPrecedence(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := codex.New("codex", upstream.URL, staticKey, t.TempDir(), time.Second, time.Second)
+	p, err := codex.New("codex", upstream.URL, staticKey, t.TempDir(), "", time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

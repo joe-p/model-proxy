@@ -22,10 +22,11 @@ type errorEnvelope struct {
 }
 
 type errorBody struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Param   any    `json:"param"`
-	Code    string `json:"code"`
+	Message  string         `json:"message"`
+	Type     string         `json:"type"`
+	Param    any            `json:"param"`
+	Code     any            `json:"code"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 func writeAPIError(w http.ResponseWriter, lr *requestLog, e *apiError) {
@@ -35,14 +36,16 @@ func writeAPIError(w http.ResponseWriter, lr *requestLog, e *apiError) {
 	if e.Allow != "" {
 		w.Header().Set("Allow", e.Allow)
 	}
+	// OpenRouter reports the HTTP status as an integer code; the proxy's
+	// machine-readable code moves into metadata.
+	body := errorBody{Message: e.Message, Type: e.Type, Param: nil, Code: e.Status}
+	if e.Code != "" {
+		body.Metadata = map[string]any{"proxy_code": e.Code}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(e.Status)
-	_ = json.NewEncoder(w).Encode(errorEnvelope{Error: errorBody{
-		Message: e.Message,
-		Type:    e.Type,
-		Param:   nil,
-		Code:    e.Code,
-	}})
+	_ = json.NewEncoder(w).Encode(errorEnvelope{Error: body})
 }
 
 func errInvalidAPIKey() *apiError {

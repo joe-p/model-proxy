@@ -61,26 +61,17 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, lr, errInvalidRequest("Request field \"model\" is required"))
 		return
 	}
-	var alias string
-	if err := json.Unmarshal(rawModel, &alias); err != nil || strings.TrimSpace(alias) == "" {
+	var requestedModel string
+	if err := json.Unmarshal(rawModel, &requestedModel); err != nil || strings.TrimSpace(requestedModel) == "" {
 		writeAPIError(w, lr, errInvalidRequest("Request field \"model\" must be a non-empty string"))
 		return
 	}
 
-	for _, field := range []string{"models", "route", "plugins"} {
-		if _, exists := fields[field]; exists {
-			writeAPIError(w, lr, errInvalidRequest(fmt.Sprintf("Request field %q is not allowed", field)))
-			return
-		}
-	}
+	tolerateOpenRouterFields(lr, fields)
 
-	model, exists := cfg.Models[alias]
-	if !exists {
-		writeAPIError(w, lr, errModelNotFound())
-		return
-	}
-	if !cfg.ModelAllowed(key, alias) {
-		writeAPIError(w, lr, errModelNotAllowed())
+	model, resolveErr := resolveModel(cfg, key, requestedModel)
+	if resolveErr != nil {
+		writeAPIError(w, lr, resolveErr)
 		return
 	}
 
@@ -122,10 +113,11 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lr.alias = alias
+	lr.alias = model.Alias
 	lr.provider = model.Provider
 	lr.billingMode = cfg.Providers[model.Provider].BillingMode
 	lr.upstream = model.Upstream
+	lr.passthrough = model.Passthrough
 	lr.stream = stream
 
 	resp, err := prov.Responses(r.Context(), provider.Request{
@@ -152,7 +144,7 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	w.Header().Set("X-Model-Proxy-Alias", alias)
+	w.Header().Set("X-Model-Proxy-Alias", model.Alias)
 	w.Header().Set("X-Model-Proxy-Upstream", model.Upstream)
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set(requestIDHeader, lr.requestID)
@@ -163,6 +155,17 @@ func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Type", "application/json")
 		}
+	}
+
+	if resp.StatusCode >= 400 {
+		lr.errorCode = "upstream_error"
+		if err := writeUpstreamError(w, resp, model.Provider); err != nil && r.Context().Err() == nil {
+			lr.errorDetail = err.Error()
+		}
+		if r.Context().Err() != nil {
+			lr.clientCanceled = true
+		}
+		return
 	}
 
 	w.WriteHeader(resp.StatusCode)

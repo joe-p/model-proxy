@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"time"
 )
 
@@ -100,11 +101,26 @@ type ProviderConfig struct {
 	AuthDir               string
 	BillingMode           string
 	PricingProvider       string
+	PassthroughModels     bool
+	ClientVersion         string
 	DialTimeout           time.Duration
 	ResponseHeaderTimeout time.Duration
 	Referer               string
 	Title                 string
 	ExtraBody             map[string]json.RawMessage
+}
+
+// PassthroughProviderNames returns the sorted names of providers configured to
+// accept model ids that the alias registry does not list.
+func (c *Config) PassthroughProviderNames() []string {
+	names := make([]string, 0, len(c.Providers))
+	for name, providerCfg := range c.Providers {
+		if providerCfg.PassthroughModels {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 type ModelConfig struct {
@@ -113,6 +129,10 @@ type ModelConfig struct {
 	Upstream  string
 	ExtraBody map[string]json.RawMessage
 	Pricing   *ModelPricing
+
+	// Passthrough marks a model that was forwarded without a configured alias.
+	// Alias then holds the requested id, which is also the upstream id.
+	Passthrough bool
 }
 
 // ModelPricing is an explicit list-price override in USD per million tokens.

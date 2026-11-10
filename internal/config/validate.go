@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -174,11 +175,31 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 		}
 
 		pricingProvider := strings.TrimSpace(rawProvider.PricingProvider)
-		if pricingProvider == "" && codexProvider {
-			pricingProvider = "openai"
+		if pricingProvider == "" {
+			switch {
+			case codexProvider:
+				pricingProvider = "openai"
+			case providerType == "openrouter":
+				// models.dev indexes OpenRouter's own catalog under "openrouter".
+				pricingProvider = "openrouter"
+			}
 		}
 		if err := validateLogValue(pricingProvider, fmt.Sprintf("provider %q pricing_provider", name)); err != nil {
 			return nil, err
+		}
+
+		clientVersion := strings.TrimSpace(rawProvider.ClientVersion)
+		if clientVersion != "" && !codexProvider {
+			return nil, fmt.Errorf("provider %q: client_version is only supported for codex providers", name)
+		}
+		if err := validateLogValue(clientVersion, fmt.Sprintf("provider %q client_version", name)); err != nil {
+			return nil, err
+		}
+		if clientVersion == "" && codexProvider && authDir != "" {
+			// The Codex model listing requires a client version. Fall back to the one
+			// recorded by the Codex CLI so passthrough listing works without extra
+			// configuration.
+			clientVersion = codexClientVersion(authDir)
 		}
 
 		dialTimeout, err := parseDuration(rawProvider.DialTimeout, 10*time.Second, fmt.Sprintf("provider %q dial_timeout", name))
@@ -201,6 +222,8 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			AuthDir:               authDir,
 			BillingMode:           billingMode,
 			PricingProvider:       pricingProvider,
+			PassthroughModels:     rawProvider.PassthroughModels,
+			ClientVersion:         clientVersion,
 			DialTimeout:           dialTimeout,
 			ResponseHeaderTimeout: responseTimeout,
 			Referer:               strings.TrimSpace(rawProvider.Referer),
@@ -423,6 +446,27 @@ func expandHomePath(path string) string {
 		}
 	}
 	return path
+}
+
+// codexClientVersion reads the version recorded by the Codex CLI in
+// <auth_dir>/version.json. It returns an empty string when the file is missing or
+// unreadable, which disables model listing but not passthrough routing.
+func codexClientVersion(authDir string) string {
+	data, err := os.ReadFile(filepath.Join(authDir, "version.json"))
+	if err != nil {
+		return ""
+	}
+	var version struct {
+		LatestVersion string `json:"latest_version"`
+		Version       string `json:"version"`
+	}
+	if err := json.Unmarshal(data, &version); err != nil {
+		return ""
+	}
+	if value := strings.TrimSpace(version.Version); value != "" {
+		return value
+	}
+	return strings.TrimSpace(version.LatestVersion)
 }
 
 // resolveAuthDir resolves a Codex credential directory. An empty value uses

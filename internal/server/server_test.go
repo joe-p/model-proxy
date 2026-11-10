@@ -201,25 +201,32 @@ func TestModelsRequiresAuthAndListsSortedAliases(t *testing.T) {
 	}
 
 	var payload struct {
-		Object string `json:"object"`
-		Data   []struct {
-			ID      string `json:"id"`
-			Object  string `json:"object"`
-			Owner   string `json:"owned_by"`
-			Created int64  `json:"created"`
+		TotalCount int `json:"total_count"`
+		Data       []struct {
+			ID            string `json:"id"`
+			CanonicalSlug string `json:"canonical_slug"`
+			Name          string `json:"name"`
+			Created       int64  `json:"created"`
+			Architecture  struct {
+				Modality        string   `json:"modality"`
+				InputModalities []string `json:"input_modalities"`
+			} `json:"architecture"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		t.Fatalf("decode models: %v", err)
 	}
-	if payload.Object != "list" || len(payload.Data) != 2 {
+	if payload.TotalCount != 2 || len(payload.Data) != 2 {
 		t.Fatalf("unexpected models payload: %+v", payload)
 	}
 	if payload.Data[0].ID != "fast" || payload.Data[1].ID != "smart" {
 		t.Fatalf("models not sorted: %+v", payload.Data)
 	}
-	if payload.Data[0].Object != "model" || payload.Data[0].Owner != "model-proxy" || payload.Data[0].Created == 0 {
+	if payload.Data[0].CanonicalSlug != "fast" || payload.Data[0].Created == 0 {
 		t.Fatalf("unexpected model metadata: %+v", payload.Data[0])
+	}
+	if payload.Data[0].Architecture.Modality != "text->text" {
+		t.Fatalf("unexpected architecture: %+v", payload.Data[0].Architecture)
 	}
 }
 
@@ -355,38 +362,59 @@ func TestChatPassesThroughUpstreamError(t *testing.T) {
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if string(body) != errorBody {
-		t.Fatalf("error body changed: %s", body)
+	var envelope struct {
+		Error struct {
+			Message  string         `json:"message"`
+			Code     int            `json:"code"`
+			Metadata map[string]any `json:"metadata"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatalf("decode error body %s: %v", body, err)
+	}
+	if envelope.Error.Message != "rate limited" || envelope.Error.Code != http.StatusTooManyRequests {
+		t.Fatalf("unexpected error envelope: %s", body)
+	}
+	if envelope.Error.Metadata["provider_name"] != "openrouter" {
+		t.Fatalf("missing provider metadata: %s", body)
 	}
 }
 
-func TestChatRejectsForbiddenFields(t *testing.T) {
+func TestChatDropsOpenRouterOnlyFields(t *testing.T) {
 	var calls atomic.Int32
+	gotBody := make(chan map[string]json.RawMessage, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(body, &fields)
+		gotBody <- fields
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer upstream.Close()
 
-	proxy, _ := newTestProxy(t, upstream.URL, nil)
-	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"models":["anthropic/claude-opus"]}`)
+	proxy, logs := newTestProxy(t, upstream.URL, nil)
+	resp := postChat(t, proxy.URL, "test-key",
+		`{"model":"fast","messages":[],"models":["anthropic/claude-opus"],"route":"fallback","plugins":[{"id":"x"}],"transforms":["middle-out"]}`)
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusBadRequest {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if calls.Load() != 0 {
-		t.Fatalf("upstream should not have been called")
+	if calls.Load() != 1 {
+		t.Fatalf("upstream calls = %d, want 1", calls.Load())
 	}
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
+	select {
+	case fields := <-gotBody:
+		for _, field := range []string{"models", "route", "plugins", "transforms"} {
+			if _, exists := fields[field]; exists {
+				t.Fatalf("%q was forwarded upstream", field)
+			}
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream was not called")
 	}
-	_ = json.NewDecoder(resp.Body).Decode(&envelope)
-	if envelope.Error.Code != "invalid_request" {
-		t.Fatalf("error code = %q", envelope.Error.Code)
-	}
+	waitForLog(t, logs, `"dropped_fields":["models","route","plugins","transforms"]`)
 }
 
 func TestChatRejectsUnknownModelAndInvalidKey(t *testing.T) {
@@ -605,12 +633,15 @@ func TestUpstreamTimeoutReturns504(t *testing.T) {
 	}
 	var envelope struct {
 		Error struct {
-			Code string `json:"code"`
+			Code     int `json:"code"`
+			Metadata struct {
+				ProxyCode string `json:"proxy_code"`
+			} `json:"metadata"`
 		} `json:"error"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&envelope)
-	if envelope.Error.Code != "upstream_timeout" {
-		t.Fatalf("error code = %q", envelope.Error.Code)
+	if envelope.Error.Code != http.StatusGatewayTimeout || envelope.Error.Metadata.ProxyCode != "upstream_timeout" {
+		t.Fatalf("error envelope = %+v", envelope.Error)
 	}
 }
 
@@ -859,14 +890,17 @@ func TestPoliciesRestrictChatAndModelListing(t *testing.T) {
 	}
 	var envelope struct {
 		Error struct {
-			Code string `json:"code"`
+			Code     int `json:"code"`
+			Metadata struct {
+				ProxyCode string `json:"proxy_code"`
+			} `json:"metadata"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		t.Fatalf("decode error: %v", err)
 	}
-	if envelope.Error.Code != "model_not_allowed" {
-		t.Fatalf("error code = %q", envelope.Error.Code)
+	if envelope.Error.Code != http.StatusForbidden || envelope.Error.Metadata.ProxyCode != "model_not_allowed" {
+		t.Fatalf("error envelope = %+v", envelope.Error)
 	}
 
 	// Blacklisted alias is rejected, other aliases are allowed.
@@ -983,4 +1017,690 @@ func rawFields(t *testing.T, value string) map[string]json.RawMessage {
 		t.Fatalf("decode raw fields: %v", err)
 	}
 	return fields
+}
+
+// passthroughProxy builds a proxy whose provider accepts unlisted model ids and
+// advertises "/models" on its upstream.
+func passthroughProxy(t *testing.T, upstream *httptest.Server, tweak func(*config.Config)) (*httptest.Server, *lockedBuffer) {
+	t.Helper()
+	return newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		for name, providerCfg := range cfg.Providers {
+			providerCfg.PassthroughModels = true
+			cfg.Providers[name] = providerCfg
+		}
+		if tweak != nil {
+			tweak(cfg)
+		}
+	})
+}
+
+func TestChatPassesThroughUnlistedModel(t *testing.T) {
+	var gotModel string
+	var gotAliasHeader, gotUpstreamHeader string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var fields map[string]json.RawMessage
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &fields)
+		_ = json.Unmarshal(fields["model"], &gotModel)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := passthroughProxy(t, upstream, nil)
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"anthropic/claude-sonnet-5","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if gotModel != "anthropic/claude-sonnet-5" {
+		t.Fatalf("upstream model = %q, want unchanged id", gotModel)
+	}
+	gotAliasHeader = resp.Header.Get("X-Model-Proxy-Alias")
+	gotUpstreamHeader = resp.Header.Get("X-Model-Proxy-Upstream")
+	if gotAliasHeader != "anthropic/claude-sonnet-5" || gotUpstreamHeader != "anthropic/claude-sonnet-5" {
+		t.Fatalf("alias/upstream headers = %q/%q", gotAliasHeader, gotUpstreamHeader)
+	}
+	waitForLog(t, logs, `"passthrough":true`)
+	waitForLog(t, logs, `"upstream_model":"anthropic/claude-sonnet-5"`)
+}
+
+func TestResponsesPassesThroughUnlistedModel(t *testing.T) {
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var fields map[string]json.RawMessage
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &fields)
+		_ = json.Unmarshal(fields["model"], &gotModel)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_1","usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := passthroughProxy(t, upstream, nil)
+
+	resp := postResponses(t, proxy.URL, "test-key", `{"model":"gpt-5.6-sol","input":[],"stream":false}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if gotModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want unchanged id", gotModel)
+	}
+	waitForLog(t, logs, `"passthrough":true`)
+	waitForLog(t, logs, `"prompt_tokens":3`)
+}
+
+func TestPassthroughRespectsPolicies(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"fast"},{"id":"denied-model"},{"id":"allowed-model"}]}`))
+			return
+		}
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := passthroughProxy(t, upstream, func(cfg *config.Config) {
+		cfg.Keys = []config.VirtualKey{
+			{Name: "allow-fast", Key: "allow-fast-key", Policy: "only-fast"},
+			{Name: "deny-fast", Key: "deny-fast-key", Policy: "no-denied"},
+		}
+		cfg.Policies = map[string]config.PolicyConfig{
+			"only-fast": {Name: "only-fast", Mode: config.PolicyWhitelist, Models: map[string]struct{}{"fast": {}}},
+			"no-denied": {Name: "no-denied", Mode: config.PolicyBlacklist, Models: map[string]struct{}{"denied-model": {}}},
+		}
+	})
+
+	// A whitelist key may not use passthrough ids, even allowed ones.
+	resp := postChat(t, proxy.URL, "allow-fast-key", `{"model":"allowed-model","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("whitelist passthrough status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "model_not_allowed") {
+		t.Fatalf("unexpected body: %s", body)
+	}
+
+	// A blacklist key may use passthrough ids it does not list.
+	resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"allowed-model","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("blacklist passthrough status = %d", resp.StatusCode)
+	}
+
+	// A blacklist key may not use a passthrough id it lists.
+	resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"denied-model","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("blacklisted passthrough status = %d", resp.StatusCode)
+	}
+	if got := upstreamCalls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
+	}
+
+	// /v1/models still filters passthrough ids by policy.
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer deny-fast-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	got := make([]string, 0, len(payload.Data))
+	for _, entry := range payload.Data {
+		got = append(got, entry.ID)
+	}
+	if want := []string{"allowed-model", "fast", "smart"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("models = %v, want %v", got, want)
+	}
+}
+
+func TestPassthroughAmbiguousProvidersRejected(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		// A second passthrough provider makes the upstream for an unlisted id
+		// ambiguous.
+		cfg.Providers["second"] = config.ProviderConfig{
+			Name:                  "second",
+			Type:                  "openai-compatible",
+			BaseURL:               upstream.URL,
+			APIKey:                "key",
+			DialTimeout:           time.Second,
+			ResponseHeaderTimeout: time.Second,
+			PassthroughModels:     true,
+		}
+		for name, providerCfg := range cfg.Providers {
+			if name == "openrouter" {
+				providerCfg.PassthroughModels = true
+				cfg.Providers[name] = providerCfg
+			}
+		}
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"mystery-model","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "openrouter") || !strings.Contains(string(body), "second") {
+		t.Fatalf("error should name both providers: %s", body)
+	}
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Fatalf("upstream calls = %d, want 0", got)
+	}
+
+	// Configured aliases still work.
+	resp = postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("alias status = %d", resp.StatusCode)
+	}
+}
+
+func TestUnknownModelWithoutPassthroughIs404(t *testing.T) {
+	proxy, _ := newTestProxy(t, "http://127.0.0.1:1", nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"mystery-model","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(string(body), "model_not_found") {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+}
+
+func TestModelsListsDiscoveredPassthroughModels(t *testing.T) {
+	var discoveryCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		discoveryCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"fast"},{"id":"zeta-model"},{"id":"alpha-model"}]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := passthroughProxy(t, upstream, nil)
+
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET models: %v", err)
+		}
+		var payload struct {
+			Data []struct {
+				ID            string `json:"id"`
+				CanonicalSlug string `json:"canonical_slug"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+			resp.Body.Close()
+			t.Fatalf("decode models: %v", err)
+		}
+		resp.Body.Close()
+
+		got := make([]string, 0, len(payload.Data))
+		for _, entry := range payload.Data {
+			got = append(got, entry.ID)
+			if entry.CanonicalSlug != entry.ID {
+				t.Fatalf("unexpected metadata for %q: %+v", entry.ID, entry)
+			}
+		}
+		// Aliases and discovered ids are merged and de-duplicated.
+		if want := []string{"alpha-model", "fast", "smart", "zeta-model"}; strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("models = %v, want %v", got, want)
+		}
+	}
+
+	if got := discoveryCalls.Load(); got != 1 {
+		t.Fatalf("discovery calls = %d, want 1 (cached)", got)
+	}
+}
+
+func TestModelsSurvivesDiscoveryFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	proxy, logs := passthroughProxy(t, upstream, nil)
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if len(payload.Data) != 2 {
+		t.Fatalf("models = %+v, want the two aliases", payload.Data)
+	}
+	waitForLog(t, logs, `"msg":"model discovery failed"`)
+}
+
+func TestPassthroughAppliesProviderExtraBody(t *testing.T) {
+	gotBody := make(chan map[string]json.RawMessage, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(body, &fields)
+		gotBody <- fields
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		for name, providerCfg := range cfg.Providers {
+			providerCfg.PassthroughModels = true
+			providerCfg.ExtraBody = map[string]json.RawMessage{
+				"provider": json.RawMessage(`{"zdr":true}`),
+			}
+			cfg.Providers[name] = providerCfg
+		}
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"zeta-model","messages":[]}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	select {
+	case fields := <-gotBody:
+		if string(fields["provider"]) != `{"zdr":true}` {
+			t.Fatalf("provider field = %s", fields["provider"])
+		}
+		if string(fields["model"]) != `"zeta-model"` {
+			t.Fatalf("model field = %s", fields["model"])
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream was not called")
+	}
+}
+
+// fakeCatalog is a pricing service that also describes models.
+type fakeCatalog struct {
+	info  pricing.ModelInfo
+	known bool
+	cost  float64
+}
+
+func (f fakeCatalog) Estimate(string, string, pricing.Usage) (float64, bool) {
+	return f.cost, true
+}
+
+func (f fakeCatalog) LookupModel(string, string) (pricing.ModelInfo, bool) {
+	return f.info, f.known
+}
+
+func solCatalog() fakeCatalog {
+	return fakeCatalog{
+		known: true,
+		cost:  7,
+		info: pricing.ModelInfo{
+			ContextLength:    1050000,
+			MaxOutputTokens:  128000,
+			InputModalities:  []string{"text", "image", "pdf"},
+			OutputModalities: []string{"text"},
+			Reasoning:        true,
+			ToolCall:         true,
+			Attachment:       true,
+			Rates:            pricing.Rates{Input: 4, CachedInput: 0.4, Output: 20, CacheWrite: 5},
+			RateTable: []pricing.TierRate{
+				{MinPromptTokens: 0, Rates: pricing.Rates{Input: 4, CachedInput: 0.4, Output: 20, CacheWrite: 5}},
+				{MinPromptTokens: 272000, Rates: pricing.Rates{Input: 8, CachedInput: 0.8, Output: 30, CacheWrite: 10}},
+			},
+		},
+	}
+}
+
+func TestModelsOpenRouterShapeUsesCatalogMetadata(t *testing.T) {
+	proxy, _ := newTestProxyWithPricing(t, "http://127.0.0.1:1", "openrouter", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["openrouter"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["openrouter"] = providerCfg
+	}, solCatalog())
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		TotalCount int `json:"total_count"`
+		Data       []struct {
+			ID            string `json:"id"`
+			CanonicalSlug string `json:"canonical_slug"`
+			Name          string `json:"name"`
+			ContextLength int64  `json:"context_length"`
+			Architecture  struct {
+				Modality         string   `json:"modality"`
+				InputModalities  []string `json:"input_modalities"`
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
+			Pricing struct {
+				Prompt         string `json:"prompt"`
+				Completion     string `json:"completion"`
+				InputCacheRead string `json:"input_cache_read"`
+				Overrides      []struct {
+					MinPromptTokens int64  `json:"min_prompt_tokens"`
+					Prompt          string `json:"prompt"`
+				} `json:"overrides"`
+			} `json:"pricing"`
+			TopProvider struct {
+				ContextLength       int64 `json:"context_length"`
+				MaxCompletionTokens int64 `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+			SupportedParameters []string `json:"supported_parameters"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if payload.TotalCount != 2 || len(payload.Data) != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+
+	model := payload.Data[0]
+	if model.ID != "fast" || model.CanonicalSlug != "fast" || model.Name != "fast" {
+		t.Fatalf("unexpected identity: %+v", model)
+	}
+	if model.ContextLength != 1050000 || model.TopProvider.MaxCompletionTokens != 128000 {
+		t.Fatalf("unexpected limits: %+v", model)
+	}
+	if model.Architecture.Modality != "text+image+file->text" {
+		t.Fatalf("unexpected modality: %q", model.Architecture.Modality)
+	}
+	if model.Pricing.Prompt != "0.000004" || model.Pricing.Completion != "0.00002" || model.Pricing.InputCacheRead != "0.0000004" {
+		t.Fatalf("unexpected pricing: %+v", model.Pricing)
+	}
+	if len(model.Pricing.Overrides) != 1 || model.Pricing.Overrides[0].MinPromptTokens != 272000 || model.Pricing.Overrides[0].Prompt != "0.000008" {
+		t.Fatalf("unexpected pricing overrides: %+v", model.Pricing.Overrides)
+	}
+
+	params := strings.Join(model.SupportedParameters, ",")
+	for _, want := range []string{"tools", "reasoning", "reasoning_effort", "temperature", "max_completion_tokens"} {
+		if !strings.Contains(params, want) {
+			t.Fatalf("supported_parameters missing %q: %s", want, params)
+		}
+	}
+}
+
+func flatCatalog() fakeCatalog {
+	return fakeCatalog{
+		known: true,
+		cost:  1.4,
+		info: pricing.ModelInfo{
+			ContextLength:    128000,
+			MaxOutputTokens:  16384,
+			InputModalities:  []string{"text"},
+			OutputModalities: []string{"text"},
+			Rates:            pricing.Rates{Input: 4, CachedInput: 4, Output: 20, CacheWrite: 4},
+			RateTable: []pricing.TierRate{
+				{MinPromptTokens: 0, Rates: pricing.Rates{Input: 4, CachedInput: 4, Output: 20, CacheWrite: 4}},
+			},
+		},
+	}
+}
+
+func TestChatInjectsEstimatedCostForAPIBilledProviders(t *testing.T) {
+	const upstreamBody = `{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":100000,"completion_tokens":50000,"total_tokens":150000}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithPricing(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["phala"] = providerCfg
+	}, flatCatalog())
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	var payload struct {
+		Usage struct {
+			Cost        *float64 `json:"cost"`
+			IsByok      *bool    `json:"is_byok"`
+			CostDetails struct {
+				Total      float64 `json:"upstream_inference_cost"`
+				Prompt     float64 `json:"upstream_inference_prompt_cost"`
+				Completion float64 `json:"upstream_inference_completions_cost"`
+			} `json:"cost_details"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode body %s: %v", body, err)
+	}
+	if payload.Usage.Cost == nil || *payload.Usage.Cost != 1.4 {
+		t.Fatalf("usage.cost = %v, want 1.4", payload.Usage.Cost)
+	}
+	if payload.Usage.IsByok == nil || *payload.Usage.IsByok {
+		t.Fatalf("usage.is_byok = %v, want false", payload.Usage.IsByok)
+	}
+	// 100k prompt tokens at $4/M plus 50k completion tokens at $20/M.
+	if payload.Usage.CostDetails.Prompt != 0.4 || payload.Usage.CostDetails.Completion != 1 || payload.Usage.CostDetails.Total != 1.4 {
+		t.Fatalf("unexpected cost details: %+v", payload.Usage.CostDetails)
+	}
+
+	// The access log keeps the estimate labelled as an estimate.
+	waitForLog(t, logs, `"estimated_api_cost_usd":1.4`)
+	waitForLog(t, logs, `"pricing_source":"models.dev"`)
+}
+
+func TestChatStreamingInjectsCostIntoUsageChunk(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: " + `{"choices":[{"delta":{"content":"hi"}}]}` + "\n\n" +
+			"data: " + `{"choices":[],"usage":{"prompt_tokens":100000,"completion_tokens":50000,"total_tokens":150000}}` + "\n\n" +
+			"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxyWithPricing(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["phala"] = providerCfg
+	}, flatCatalog())
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":true}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	stream := string(body)
+	if !strings.Contains(stream, `"cost":1.4`) {
+		t.Fatalf("stream missing injected cost: %s", stream)
+	}
+	if !strings.Contains(stream, `"is_byok":false`) {
+		t.Fatalf("stream missing is_byok: %s", stream)
+	}
+	if strings.Count(stream, `"cost":1.4`) != 1 {
+		t.Fatalf("cost injected more than once: %s", stream)
+	}
+}
+
+func TestChatSkipsCostInjectionForSubscriptionBilling(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":1000000,"completion_tokens":500000,"total_tokens":1500000}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxyWithPricing(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.PricingProvider = "openai"
+		providerCfg.BillingMode = "subscription"
+		cfg.Providers["phala"] = providerCfg
+	}, solCatalog())
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), `"cost"`) {
+		t.Fatalf("subscription provider must not report a cost: %s", body)
+	}
+}
+
+func TestChatKeepsProviderReportedCost(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.5}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxyWithPricing(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["phala"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["phala"] = providerCfg
+	}, solCatalog())
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var payload struct {
+		Usage struct {
+			Cost *float64 `json:"cost"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("decode body %s: %v", body, err)
+	}
+	if payload.Usage.Cost == nil || *payload.Usage.Cost != 0.5 {
+		t.Fatalf("usage.cost = %v, want the reported 0.5", payload.Usage.Cost)
+	}
+	// Reported costs suppress the estimate in the access log.
+	waitForLog(t, logs, `"cost_usd":0.5`)
+	if strings.Contains(logs.String(), "estimated_api_cost_usd") {
+		t.Fatalf("log should not estimate a reported cost")
+	}
+}
+
+func TestCORSPreflightAndHeaders(t *testing.T) {
+	proxy, _ := newTestProxy(t, "http://127.0.0.1:1", nil)
+
+	req, _ := http.NewRequest(http.MethodOptions, proxy.URL+"/v1/chat/completions", nil)
+	req.Header.Set("Origin", "https://app.example")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("preflight: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("preflight status = %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Fatalf("allow-origin = %q", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Authorization") {
+		t.Fatalf("allow-headers = %q", got)
+	}
+
+	// Preflight must not require a virtual key, and normal responses expose the
+	// proxy headers.
+	req, _ = http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	resp.Body.Close()
+	if got := resp.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Model-Proxy-Alias") {
+		t.Fatalf("expose-headers = %q", got)
+	}
+}
+
+func TestAPIV1PathsAreAliased(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, nil)
+
+	resp, err := http.Post(proxy.URL+"/api/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"fast","messages":[]}`))
+	if err != nil {
+		t.Fatalf("POST /api/v1/chat/completions: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status without key = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/api/v1/chat/completions", strings.NewReader(`{"model":"fast","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST with key: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, proxy.URL+"/api/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/v1/models: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("models status = %d", resp.StatusCode)
+	}
 }

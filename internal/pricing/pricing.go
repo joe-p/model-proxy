@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"time"
 )
@@ -42,6 +43,25 @@ type Rates struct {
 	CachedInput float64
 	Output      float64
 	CacheWrite  float64
+}
+
+// ModelInfo is catalog metadata for one provider model.
+type ModelInfo struct {
+	ContextLength    int64
+	MaxOutputTokens  int64
+	InputModalities  []string
+	OutputModalities []string
+	Reasoning        bool
+	ToolCall         bool
+	Attachment       bool
+	Rates            Rates
+	RateTable        []TierRate
+}
+
+// TierRate is a context-tier price that applies at or above MinPromptTokens.
+type TierRate struct {
+	MinPromptTokens int64
+	Rates           Rates
 }
 
 // EstimateUsage computes an API-equivalent cost from token counts and rates.
@@ -321,8 +341,21 @@ type catalogProvider struct {
 }
 
 type catalogModel struct {
-	ID   string       `json:"id"`
-	Cost *catalogCost `json:"cost"`
+	ID         string       `json:"id"`
+	Cost       *catalogCost `json:"cost"`
+	Limit      catalogLimit `json:"limit"`
+	Modalities struct {
+		Input  []string `json:"input"`
+		Output []string `json:"output"`
+	} `json:"modalities"`
+	Reasoning  bool `json:"reasoning"`
+	ToolCall   bool `json:"tool_call"`
+	Attachment bool `json:"attachment"`
+}
+
+type catalogLimit struct {
+	Context int64 `json:"context"`
+	Output  int64 `json:"output"`
 }
 
 type catalogCost struct {
@@ -370,6 +403,73 @@ func (c *catalogCost) rates(promptTokens int64) Rates {
 		return buildRates(c.ContextOver200k.Input, c.ContextOver200k.Output, c.ContextOver200k.CacheRead, c.ContextOver200k.CacheWrite)
 	}
 	return buildRates(c.Input, c.Output, c.CacheRead, c.CacheWrite)
+}
+
+// ModelInfo is catalog metadata used to describe a model to clients.
+// RateTable is ordered by MinPromptTokens ascending; the last entry at or below
+// the observed prompt size applies.
+func (i ModelInfo) RatesFor(promptTokens int64) Rates {
+	selected := i.Rates
+	for _, tier := range i.RateTable {
+		if promptTokens >= tier.MinPromptTokens {
+			selected = tier.Rates
+		}
+	}
+	return selected
+}
+
+// LookupModel returns catalog metadata for a provider model.
+func (s *Service) LookupModel(providerID, modelID string) (ModelInfo, bool) {
+	catalog := s.catalog.Load()
+	if catalog == nil {
+		return ModelInfo{}, false
+	}
+	provider, ok := (*catalog)[providerID]
+	if !ok {
+		return ModelInfo{}, false
+	}
+	model, ok := provider.Models[modelID]
+	if !ok {
+		return ModelInfo{}, false
+	}
+
+	info := ModelInfo{
+		ContextLength:    model.Limit.Context,
+		MaxOutputTokens:  model.Limit.Output,
+		InputModalities:  model.Modalities.Input,
+		OutputModalities: model.Modalities.Output,
+		Reasoning:        model.Reasoning,
+		ToolCall:         model.ToolCall,
+		Attachment:       model.Attachment,
+	}
+	if model.Cost != nil {
+		info.Rates = buildRates(model.Cost.Input, model.Cost.Output, model.Cost.CacheRead, model.Cost.CacheWrite)
+		info.RateTable = model.Cost.rateTable()
+	}
+	return info, true
+}
+
+func (c *catalogCost) rateTable() []TierRate {
+	table := []TierRate{{MinPromptTokens: 0, Rates: buildRates(c.Input, c.Output, c.CacheRead, c.CacheWrite)}}
+	for _, tier := range c.Tiers {
+		if tier.Tier.Type != "context" {
+			continue
+		}
+		table = append(table, TierRate{
+			MinPromptTokens: tier.Tier.Size,
+			Rates:           buildRates(tier.Input, tier.Output, tier.CacheRead, tier.CacheWrite),
+		})
+	}
+	// models.dev duplicates its tiered pricing under context_over_200k for older
+	// catalog entries. Prefer the explicit tiers when present.
+	if c.ContextOver200k != nil && len(c.Tiers) == 0 {
+		table = append(table, TierRate{
+			MinPromptTokens: 200_000,
+			Rates:           buildRates(c.ContextOver200k.Input, c.ContextOver200k.Output, c.ContextOver200k.CacheRead, c.ContextOver200k.CacheWrite),
+		})
+	}
+	sort.SliceStable(table, func(a, b int) bool { return table[a].MinPromptTokens < table[b].MinPromptTokens })
+	return table
 }
 
 func buildRates(input, output float64, cacheRead, cacheWrite *float64) Rates {

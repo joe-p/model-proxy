@@ -24,6 +24,13 @@ type Provider interface {
 	Responses(ctx context.Context, req Request) (*http.Response, error)
 }
 
+// ModelLister is implemented by providers that can enumerate the models they
+// serve. The server uses it to expand /v1/models for providers configured with
+// passthrough models.
+type ModelLister interface {
+	Models(ctx context.Context) ([]string, error)
+}
+
 type ErrorKind int
 
 const (

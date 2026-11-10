@@ -5,8 +5,10 @@ package openaicompat
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -21,6 +23,12 @@ const DefaultPath = "/chat/completions"
 // DefaultResponsesPath is appended to the configured base URL for Responses
 // API requests.
 const DefaultResponsesPath = "/responses"
+
+// DefaultModelsPath is appended to the configured base URL for model listing.
+const DefaultModelsPath = "/models"
+
+// maxModelsBodyBytes caps how much of a model listing response is read.
+const maxModelsBodyBytes = 4 << 20
 
 // TokenSource resolves a per-request upstream credential. Implementations such
 // as the Codex authenticator read and refresh credentials from disk.
@@ -48,6 +56,14 @@ type Options struct {
 	// DefaultResponsesPath is used when empty.
 	ResponsesPath string
 
+	// ModelsPath is appended to BaseURL for model listing. DefaultModelsPath is
+	// used when empty.
+	ModelsPath string
+
+	// ModelsQuery is an optional raw query appended to the model listing URL,
+	// such as Codex's required client_version parameter.
+	ModelsQuery string
+
 	// Headers are additional request headers, such as OpenRouter's
 	// attribution headers. They are set after the standard headers.
 	Headers map[string]string
@@ -58,6 +74,8 @@ type Provider struct {
 	baseURL       string
 	path          string
 	responsesPath string
+	modelsPath    string
+	modelsQuery   string
 	apiKey        string
 	tokenSource   TokenSource
 	headers       http.Header
@@ -83,6 +101,7 @@ func New(opts Options) (*Provider, error) {
 
 	path := normalizePath(opts.Path, DefaultPath)
 	responsesPath := normalizePath(opts.ResponsesPath, DefaultResponsesPath)
+	modelsPath := normalizePath(opts.ModelsPath, DefaultModelsPath)
 
 	headers := make(http.Header, len(opts.Headers))
 	for key, value := range opts.Headers {
@@ -106,6 +125,8 @@ func New(opts Options) (*Provider, error) {
 		baseURL:       strings.TrimRight(opts.BaseURL, "/"),
 		path:          path,
 		responsesPath: responsesPath,
+		modelsPath:    modelsPath,
+		modelsQuery:   strings.TrimPrefix(strings.TrimSpace(opts.ModelsQuery), "?"),
 		apiKey:        opts.APIKey,
 		tokenSource:   opts.TokenSource,
 		headers:       headers,
@@ -151,22 +172,10 @@ func (p *Provider) do(ctx context.Context, path string, req provider.Request) (*
 		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
 	}
 
-	token := p.apiKey
-	if p.tokenSource != nil {
-		var accountID string
-		token, accountID, err = p.tokenSource.Token(ctx)
-		if err != nil {
-			return nil, &provider.Error{Kind: provider.Unavailable, Err: fmt.Errorf("resolve upstream credential: %w", err)}
-		}
-		if token == "" {
-			return nil, &provider.Error{Kind: provider.Unavailable, Err: errors.New("upstream credential is empty")}
-		}
-		if accountID != "" {
-			httpReq.Header.Set("ChatGPT-Account-Id", accountID)
-		}
+	if err := p.authorize(ctx, httpReq); err != nil {
+		return nil, err
 	}
 
-	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 	if req.Accept != "" {
 		httpReq.Header.Set("Accept", req.Accept)
@@ -197,4 +206,128 @@ func (p *Provider) do(ctx context.Context, path string, req provider.Request) (*
 		return nil, &provider.Error{Kind: kind, Err: err}
 	}
 	return resp, nil
+}
+
+// authorize applies the provider credential to a request. Token sources are
+// consulted per request so refreshed credentials are picked up immediately.
+func (p *Provider) authorize(ctx context.Context, req *http.Request) error {
+	token := p.apiKey
+	if p.tokenSource != nil {
+		var accountID string
+		var err error
+		token, accountID, err = p.tokenSource.Token(ctx)
+		if err != nil {
+			return &provider.Error{Kind: provider.Unavailable, Err: fmt.Errorf("resolve upstream credential: %w", err)}
+		}
+		if token == "" {
+			return &provider.Error{Kind: provider.Unavailable, Err: errors.New("upstream credential is empty")}
+		}
+		if accountID != "" {
+			req.Header.Set("ChatGPT-Account-Id", accountID)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	for key, values := range p.headers {
+		for _, value := range values {
+			req.Header.Set(key, value)
+		}
+	}
+	return nil
+}
+
+// Models lists the upstream model ids. It understands both the OpenAI
+// shape ({"data":[{"id":...}]}) and the Codex shape
+// ({"models":[{"slug":...}]}), so a single implementation serves every
+// provider.
+func (p *Provider) Models(ctx context.Context) ([]string, error) {
+	endpoint := p.baseURL + p.modelsPath
+	if p.modelsQuery != "" {
+		endpoint += "?" + p.modelsQuery
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	if err := p.authorize(ctx, httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		kind := provider.Unavailable
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() || errors.Is(err, context.DeadlineExceeded) {
+			kind = provider.Timeout
+		}
+		return nil, &provider.Error{Kind: kind, Err: err}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBodyBytes))
+	if err != nil {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream model listing returned %d: %s", resp.StatusCode, snippet(body))
+	}
+
+	ids, err := parseModelIDs(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream model listing: %w", err)
+	}
+	return ids, nil
+}
+
+func parseModelIDs(body []byte) ([]string, error) {
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		Models []struct {
+			Slug string `json:"slug"`
+			ID   string `json:"id"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{}, len(payload.Data)+len(payload.Models))
+	ids := make([]string, 0, len(payload.Data)+len(payload.Models))
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	for _, entry := range payload.Data {
+		add(entry.ID)
+	}
+	for _, entry := range payload.Models {
+		if entry.Slug != "" {
+			add(entry.Slug)
+			continue
+		}
+		add(entry.ID)
+	}
+	return ids, nil
+}
+
+func snippet(body []byte) string {
+	const maxSnippet = 200
+	text := strings.TrimSpace(string(body))
+	if len(text) > maxSnippet {
+		text = text[:maxSnippet] + "..."
+	}
+	return text
 }

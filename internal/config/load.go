@@ -68,6 +68,8 @@ type rawProvider struct {
 	AuthDir               string         `json:"auth_dir"`
 	BillingMode           string         `json:"billing_mode"`
 	PricingProvider       string         `json:"pricing_provider"`
+	PassthroughModels     bool           `json:"passthrough_models"`
+	ClientVersion         string         `json:"client_version"`
 	DialTimeout           *string        `json:"dial_timeout"`
 	ResponseHeaderTimeout *string        `json:"response_header_timeout"`
 	Referer               string         `json:"referer"`

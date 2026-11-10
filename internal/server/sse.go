@@ -10,23 +10,26 @@ import (
 	"github.com/joe-p/model-proxy/internal/openroutercompat"
 )
 
-// copySSE forwards SSE bytes, optionally normalizing usage metadata to the
-// OpenRouter shape. When parsing is enabled it observes the terminal usage
-// chunk without modifying it.
-func copySSE(dst http.ResponseWriter, src io.Reader, parseUsage, normalize bool) (*usage, error) {
+// copySSE forwards SSE bytes after normalizing usage metadata to the OpenRouter
+// shape and injecting a derived cost. Usage is observed from the provider's bytes
+// before normalization so the access log keeps the reported values.
+func copySSE(dst http.ResponseWriter, src io.Reader, parseUsage bool, cost openroutercompat.CostFunc) (*usage, error) {
 	reader := bufio.NewReader(src)
 	var lastUsage *usage
 
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			if normalize {
-				if normalized, changed := normalizeSSELine(line); changed {
-					line = normalized
-				}
+			reported := usageFromSSELine(line)
+			if normalized, changed := normalizeSSELine(line, cost); changed {
+				line = normalized
 			}
-			if parseUsage {
+			if parseUsage && reported != nil {
 				if observed := usageFromSSELine(line); observed != nil {
+					// An injected estimate must not masquerade as a reported cost.
+					if reported.Cost == nil {
+						observed.Cost = nil
+					}
 					lastUsage = observed
 				}
 			}
@@ -49,7 +52,7 @@ func copySSE(dst http.ResponseWriter, src io.Reader, parseUsage, normalize bool)
 // normalizeSSELine rewrites an SSE data line's usage object to the OpenRouter
 // shape. Lines that are not JSON data events, or that need no change, are
 // returned unchanged.
-func normalizeSSELine(line []byte) ([]byte, bool) {
+func normalizeSSELine(line []byte, cost openroutercompat.CostFunc) ([]byte, bool) {
 	trimmed := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return line, false
@@ -58,7 +61,7 @@ func normalizeSSELine(line []byte) ([]byte, bool) {
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return line, false
 	}
-	normalized, changed, err := openroutercompat.NormalizeChatCompletion(payload)
+	normalized, changed, err := openroutercompat.NormalizeChatCompletion(payload, cost)
 	if err != nil || !changed {
 		return line, false
 	}

@@ -119,12 +119,22 @@
     // auth_dir, $CODEX_HOME or ~/.codex is used. api_key_env is optional; when
     // set it is used as a static bearer token instead of the auth file.
     // billing_mode defaults to "subscription" for codex providers.
+    //
+    // "passthrough_models" accepts model ids that are not listed under
+    // "models": the requested id is forwarded upstream unchanged, and
+    // GET /v1/models merges the upstream model list. Enable it on at most one
+    // provider, otherwise unlisted ids are ambiguous.
     // "codex": {
     //   "type": "codex",
     //   "base_url": "https://chatgpt.com/backend-api/codex",
     //   "auth_dir": "~/.codex",
     //   "billing_mode": "subscription",
     //   "pricing_provider": "openai",
+    //   "passthrough_models": true,
+    //   // Only codex providers accept client_version. The Codex model listing
+    //   // requires it; when unset, latest_version from
+    //   // <auth_dir>/version.json is used.
+    //   "client_version": "0.167.0",
     // }
   },
 
