@@ -3,7 +3,8 @@
 A small TypeScript collector that turns model-proxy's JSON access records into a
 usage dashboard. It accepts records over HTTP from model-proxy's access sink, or
 from stdout/file for offline replay, stores them in SQLite, then serves a page
-with cost totals, a subscription-estimate toggle, and a per-model breakdown.
+with cost totals, a subscription-estimate toggle, a stacked cost-or-token chart
+with day/week/month buckets, and a per-model breakdown.
 
 It has **no runtime dependencies**. It uses `node:sqlite` (Node 22.13+) and
 `tsx` only to run TypeScript directly.
@@ -85,6 +86,21 @@ Options: `--db <path>`, `--port <n>`, `--host <addr>`. Run
 It responds with `202` and `{"accepted":n,"skipped":n}`. A malformed body gets
 `400`; an oversized body gets `413`. Rows are inserted in a single transaction.
 
+## HTTP JSON API
+
+`GET /api/usage` returns the data rendered by the page:
+
+```
+/api/usage?hours=168&bucket=day&metric=cost&includeSubscription=1
+```
+
+`hours` is the lookback window. `bucket` is `day`, `week`, or `month`; buckets
+are UTC and weeks start on Monday. `metric` is `cost` or `tokens`; it controls
+the chart's stacking order and legend totals. The response includes
+`summary`, `models`, and `timeseries`, where each bucket has `start`, `end`, and
+per-model `segments` with reported, estimated, and total cost plus token counts.
+Empty buckets are included so the chart's time axis is continuous.
+
 ## What it computes
 
 | Metric | Source |
@@ -98,8 +114,12 @@ Estimated and reported cost are never summed on the same row, so the total
 cannot double-count. The toggle only affects the subscription estimate: that
 usage did not incur a per-token charge, so it is off by default.
 
-The model breakdown groups by `alias` (falling back to `upstream_model`) and
-provider. Token counts are the prompt/completion sums from the log.
+The model breakdown and the chart's stacked segments group by `alias` (falling
+back to `upstream_model`) and provider. Token counts are the prompt/completion
+sums from the log. The chart stacks total cost or prompt/completion tokens per
+time bucket, using the same subscription toggle as the cards when the cost
+metric is selected. Hover a segment for its bucket, model/provider, selected
+metric, the other metric, and request/error counts.
 
 ## How it works
 
@@ -110,6 +130,8 @@ POST /ingest ──{"records":[...]}─────┴──▶ parse.ts ──�
 
 - `src/parse.ts` keeps only `msg: "request"` records and drops `/healthz`.
 - `src/server.ts` serves the page, the JSON API, and `POST /ingest`.
+- `src/time.ts` defines the UTC day/week/month buckets shared by SQLite and the
+  API.
 - `src/db.ts` stores rows with `request_id` as the primary key, so replaying a
   log, retrying an HTTP batch, or restarting the collector does not double-count.
 - `src/ingest.ts` handles stdout/file modes and batches 250 rows or flushes

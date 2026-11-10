@@ -31,6 +31,9 @@
       * {
         box-sizing: border-box;
       }
+      [hidden] {
+        display: none !important;
+      }
       body {
         margin: 0;
         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -114,6 +117,168 @@
         border-radius: 12px;
         background: var(--panel);
         overflow-x: auto;
+      }
+      .chart-panel {
+        margin-bottom: 24px;
+        overflow: hidden;
+      }
+      .chart-head {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+      .chart-head h2 {
+        margin: 0;
+      }
+      .chart-shell {
+        display: grid;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 8px;
+      }
+      .chart-yaxis {
+        position: relative;
+        height: 224px;
+        color: var(--muted);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+      }
+      .chart-yaxis span {
+        position: absolute;
+        right: 0;
+        transform: translateY(-50%);
+      }
+      .chart-scroll {
+        min-width: 0;
+        overflow-x: auto;
+        overflow-y: hidden;
+        padding-bottom: 2px;
+      }
+      .chart-plot {
+        position: relative;
+        height: 244px;
+        min-width: 100%;
+      }
+      .chart-grid {
+        position: absolute;
+        inset: 0 0 20px;
+        pointer-events: none;
+      }
+      .chart-grid div {
+        position: absolute;
+        left: 0;
+        right: 0;
+        border-top: 1px dashed var(--border);
+      }
+      .chart-buckets {
+        position: relative;
+        display: flex;
+        align-items: flex-end;
+        gap: 4px;
+        height: 100%;
+      }
+      .chart-bucket {
+        display: flex;
+        flex: 1 0 var(--bar-min, 18px);
+        flex-direction: column;
+        height: 100%;
+      }
+      .chart-bararea {
+        display: flex;
+        flex: 1;
+        align-items: flex-end;
+        justify-content: center;
+        border-radius: 4px 4px 0 0;
+      }
+      .chart-bucket:hover .chart-bararea {
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+      .chart-stack {
+        display: flex;
+        flex-direction: column-reverse;
+        justify-content: flex-start;
+        width: 100%;
+        max-width: 44px;
+        height: 100%;
+        overflow: hidden;
+        border-radius: 3px 3px 0 0;
+      }
+      .chart-seg {
+        width: 100%;
+        min-height: 1px;
+        transition: filter 0.12s ease;
+      }
+      .chart-seg:hover {
+        filter: brightness(1.15);
+      }
+      .chart-tick {
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        height: 20px;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 16px;
+        margin-top: 14px;
+      }
+      .legend-item {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        font-size: 12px;
+      }
+      .swatch {
+        flex: none;
+        width: 10px;
+        height: 10px;
+        border-radius: 2px;
+      }
+      .legend-total {
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .chart-tooltip {
+        position: fixed;
+        z-index: 50;
+        max-width: 300px;
+        padding: 9px 11px;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        background: var(--panel);
+        color: var(--text);
+        box-shadow: 0 8px 24px rgb(0 0 0 / 0.2);
+        font-size: 12px;
+        line-height: 1.45;
+        pointer-events: none;
+      }
+      .chart-tooltip .tip-title {
+        margin-bottom: 4px;
+        color: var(--muted);
+      }
+      .chart-tooltip .tip-model {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+        font-weight: 600;
+      }
+      .chart-tooltip .tip-value {
+        margin-top: 4px;
+        font-size: 14px;
+        font-variant-numeric: tabular-nums;
+      }
+      .chart-tooltip .tip-meta {
+        margin-top: 3px;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
       }
       table {
         width: 100%;
@@ -209,8 +374,25 @@
           Range
           <select id="range">
             <option value="24">Last 24h</option>
-            <option value="168">Last 7d</option>
+            <option value="168" selected>Last 7d</option>
             <option value="720">Last 30d</option>
+            <option value="2160">Last 90d</option>
+            <option value="8760">Last 12mo</option>
+          </select>
+        </label>
+        <label>
+          Metric
+          <select id="metric">
+            <option value="cost" selected>Cost</option>
+            <option value="tokens">Tokens</option>
+          </select>
+        </label>
+        <label>
+          Group by
+          <select id="bucket">
+            <option value="day" selected>Day</option>
+            <option value="week">Week</option>
+            <option value="month">Month</option>
           </select>
         </label>
         <label>
@@ -256,6 +438,27 @@
         </div>
       </section>
 
+      <section class="panel chart-panel">
+        <div class="chart-head">
+          <h2 id="chartTitle">Cost by model over time</h2>
+          <span class="sub" id="chartNote"></span>
+        </div>
+        <div class="chart-shell" id="chartShell">
+          <div class="chart-yaxis" id="chartYAxis"></div>
+          <div class="chart-scroll">
+            <div class="chart-plot" id="chartPlot">
+              <div class="chart-grid" id="chartGrid"></div>
+              <div class="chart-buckets" id="chartBuckets"></div>
+            </div>
+          </div>
+        </div>
+        <p class="empty" id="chartEmpty" hidden>
+          No cost recorded in this range yet. Try the token metric or turn on
+          subscription estimates.
+        </p>
+        <div class="legend" id="legend"></div>
+      </section>
+
       <section class="panel">
         <h2>Model breakdown</h2>
         <table id="models">
@@ -280,8 +483,33 @@
 
     <footer id="updated"></footer>
 
+    <div class="chart-tooltip" id="chartTooltip" role="tooltip" hidden></div>
+
     <script>
-      const state = { hours: 24, includeSub: false };
+      const state = {
+        hours: 168,
+        bucket: 'day',
+        metric: 'cost',
+        includeSub: false,
+        colors: new Map(),
+        nextColor: 0,
+      };
+
+      const SERIES_COLORS = [
+        '#2563eb',
+        '#0d9488',
+        '#d97706',
+        '#dc2626',
+        '#7c3aed',
+        '#db2777',
+        '#16a34a',
+        '#0891b2',
+        '#ca8a04',
+        '#9333ea',
+        '#e11d48',
+        '#65a30d',
+      ];
+      const BUCKET_LABELS = { day: 'Daily', week: 'Weekly', month: 'Monthly' };
 
       const $ = (id) => document.getElementById(id);
       const usd = (value) => {
@@ -302,6 +530,93 @@
           notation: 'compact',
           maximumFractionDigits: 1,
         });
+      const usdTick = (value) => {
+        const n = Number(value) || 0;
+        if (n === 0) return '$0';
+        const abs = Math.abs(n);
+        const digits = abs < 0.01 ? 6 : abs < 1 ? 3 : 0;
+        return n.toLocaleString(undefined, {
+          style: 'currency',
+          currency: 'USD',
+          maximumFractionDigits: digits,
+        });
+      };
+
+      const modelKey = (model, provider) => `${model}\u0000${provider}`;
+
+      function colorFor(model, provider) {
+        const key = modelKey(model, provider);
+        let color = state.colors.get(key);
+        if (!color) {
+          color = SERIES_COLORS[state.nextColor % SERIES_COLORS.length];
+          state.nextColor += 1;
+          state.colors.set(key, color);
+        }
+        return color;
+      }
+
+      function bucketLabel(bucket, iso) {
+        const date = new Date(iso);
+        const base = { timeZone: 'UTC' };
+        if (bucket === 'month') {
+          return date.toLocaleDateString(undefined, {
+            ...base,
+            month: 'short',
+            year: '2-digit',
+          });
+        }
+        return date.toLocaleDateString(undefined, {
+          ...base,
+          month: 'short',
+          day: 'numeric',
+        });
+      }
+
+      function bucketTitle(bucket, iso) {
+        const date = new Date(iso);
+        const base = { timeZone: 'UTC' };
+        if (bucket === 'month') {
+          return date.toLocaleDateString(undefined, {
+            ...base,
+            month: 'long',
+            year: 'numeric',
+          });
+        }
+        if (bucket === 'week') {
+          return `Week of ${date.toLocaleDateString(undefined, {
+            ...base,
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+          })}`;
+        }
+        return date.toLocaleDateString(undefined, {
+          ...base,
+          weekday: 'short',
+          month: 'long',
+          day: 'numeric',
+          year: 'numeric',
+        });
+      }
+
+      function niceScale(maxValue, minStep = 0) {
+        if (!(maxValue > 0)) {
+          return { max: 1, ticks: [0, 0.25, 0.5, 0.75, 1] };
+        }
+        const rough = maxValue / 4;
+        const exponent = Math.floor(Math.log10(rough));
+        const magnitude = 10 ** exponent;
+        const residual = rough / magnitude;
+        const step = Math.max(
+          minStep,
+          (residual <= 1 ? 1 : residual <= 2 ? 2 : residual <= 5 ? 5 : 10) *
+            magnitude,
+        );
+        const max = Math.ceil(maxValue / step) * step;
+        const ticks = [];
+        for (let value = 0; value <= max + step / 2; value += step) ticks.push(value);
+        return { max, ticks };
+      }
 
       function showError(message) {
         const banner = $('error');
@@ -311,6 +626,75 @@
 
       function clearError() {
         $('error').style.display = 'none';
+      }
+
+      function positionChartTooltip(event) {
+        const tooltip = $('chartTooltip');
+        if (tooltip.hidden) return;
+
+        const pad = 8;
+        const offset = 14;
+        const rect = tooltip.getBoundingClientRect();
+        let left = event.clientX + offset;
+        let top = event.clientY + offset;
+        if (left + rect.width > window.innerWidth - pad) {
+          left = event.clientX - rect.width - offset;
+        }
+        if (top + rect.height > window.innerHeight - pad) {
+          top = event.clientY - rect.height - offset;
+        }
+        tooltip.style.left = `${Math.max(pad, left)}px`;
+        tooltip.style.top = `${Math.max(pad, top)}px`;
+      }
+
+      function hideChartTooltip() {
+        $('chartTooltip').hidden = true;
+      }
+
+      function showChartTooltip(event, details) {
+        const tooltip = $('chartTooltip');
+        tooltip.textContent = '';
+
+        const title = document.createElement('div');
+        title.className = 'tip-title';
+        title.textContent = details.title;
+        tooltip.append(title);
+
+        const model = document.createElement('div');
+        model.className = 'tip-model';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.background = details.color;
+        const name = document.createElement('span');
+        name.textContent = details.model;
+        model.append(swatch, name);
+        if (details.provider) {
+          const provider = document.createElement('span');
+          provider.className = 'sub';
+          provider.textContent = details.provider;
+          model.append(provider);
+        }
+        tooltip.append(model);
+
+        const value = document.createElement('div');
+        value.className = 'tip-value';
+        value.textContent = details.value;
+        tooltip.append(value);
+
+        const meta = document.createElement('div');
+        meta.className = 'tip-meta';
+        meta.textContent = details.meta;
+        tooltip.append(meta);
+
+        if (details.secondary) {
+          const secondary = document.createElement('div');
+          secondary.className = 'tip-meta';
+          secondary.textContent = details.secondary;
+          tooltip.append(secondary);
+        }
+
+        tooltip.hidden = false;
+        positionChartTooltip(event);
       }
 
       function cell(value, note, muted) {
@@ -387,6 +771,175 @@
         }
       }
 
+      function renderChart(data) {
+        hideChartTooltip();
+        const metric = data.metric === 'tokens' ? 'tokens' : 'cost';
+        const valueOf = (row) =>
+          metric === 'tokens'
+            ? (Number(row.promptTokens) || 0) + (Number(row.completionTokens) || 0)
+            : Number(row.totalCostUsd) || 0;
+        const formatAxis = metric === 'tokens' ? compact : usdTick;
+        const formatValue = metric === 'tokens' ? compact : usd;
+        const describeValue = (value) =>
+          metric === 'tokens' ? `${compact(value)} tokens` : formatValue(value);
+
+        const buckets = data.timeseries ?? [];
+        const totals = buckets.map((bucket) =>
+          bucket.segments.reduce((sum, segment) => sum + valueOf(segment), 0),
+        );
+        const maxTotal = totals.reduce((max, value) => Math.max(max, value), 0);
+        const hasUsage = maxTotal > 0;
+
+        $('chartTitle').textContent =
+          metric === 'tokens' ? 'Tokens by model over time' : 'Cost by model over time';
+        $('chartNote').textContent = `${BUCKET_LABELS[data.bucket] ?? data.bucket} ${
+          metric === 'tokens' ? 'token' : 'cost'
+        } totals by model · UTC`;
+        $('chartEmpty').textContent =
+          metric === 'tokens'
+            ? 'No token usage recorded in this range yet.'
+            : 'No cost recorded in this range yet. Try the token metric or turn on subscription estimates.';
+        $('chartShell').hidden = !hasUsage;
+        $('chartEmpty').hidden = hasUsage;
+        $('legend').hidden = !hasUsage;
+        if (!hasUsage) {
+          $('chartYAxis').textContent = '';
+          $('chartGrid').textContent = '';
+          $('chartBuckets').textContent = '';
+          $('legend').textContent = '';
+          return;
+        }
+
+        const { max, ticks } = niceScale(maxTotal, metric === 'tokens' ? 1 : 0);
+
+        const yAxis = $('chartYAxis');
+        yAxis.textContent = '';
+        for (const tick of ticks) {
+          const label = document.createElement('span');
+          label.style.top = `${(1 - tick / max) * 100}%`;
+          label.textContent = formatAxis(tick);
+          yAxis.append(label);
+        }
+
+        const grid = $('chartGrid');
+        grid.textContent = '';
+        for (const tick of ticks) {
+          const line = document.createElement('div');
+          line.style.top = `${(1 - tick / max) * 100}%`;
+          if (tick === 0) line.style.borderTopStyle = 'solid';
+          grid.append(line);
+        }
+
+        const barMin =
+          buckets.length > 180 ? 6 : buckets.length > 60 ? 10 : buckets.length > 30 ? 14 : 20;
+        const plot = $('chartPlot');
+        plot.style.setProperty('--bar-min', `${barMin}px`);
+        plot.style.minWidth = `${Math.max(320, buckets.length * (barMin + 4))}px`;
+
+        const bars = $('chartBuckets');
+        bars.textContent = '';
+        const labelStep = Math.max(1, Math.ceil(buckets.length / 12));
+
+        for (let index = 0; index < buckets.length; index += 1) {
+          const bucket = buckets[index];
+          const total = totals[index];
+          const column = document.createElement('div');
+          column.className = 'chart-bucket';
+
+          const area = document.createElement('div');
+          area.className = 'chart-bararea';
+          const stack = document.createElement('div');
+          stack.className = 'chart-stack';
+
+          for (const segment of bucket.segments) {
+            const value = valueOf(segment);
+            if (!(value > 0)) continue;
+            const part = document.createElement('div');
+            part.className = 'chart-seg';
+            part.style.height = `${(value / max) * 100}%`;
+            const color = colorFor(segment.model, segment.provider);
+            part.style.background = color;
+
+            const tokens =
+              (Number(segment.promptTokens) || 0) +
+              (Number(segment.completionTokens) || 0);
+            const details = {
+              title: bucketTitle(data.bucket, bucket.start),
+              model: segment.model,
+              provider: segment.provider,
+              color,
+              value: describeValue(value),
+              meta: `${count(segment.requests)} requests${
+                segment.errors ? ` · ${count(segment.errors)} errors` : ''
+              }`,
+              secondary:
+                metric === 'tokens'
+                  ? `Cost ${usd(segment.totalCostUsd)}`
+                  : `Tokens ${compact(tokens)} (${compact(
+                      segment.promptTokens,
+                    )} prompt · ${compact(segment.completionTokens)} completion)`,
+            };
+            part.setAttribute(
+              'aria-label',
+              `${details.title} · ${details.model}${
+                details.provider ? ` (${details.provider})` : ''
+              } · ${details.value} · ${details.meta}`,
+            );
+            part.addEventListener('pointerenter', (event) =>
+              showChartTooltip(event, details),
+            );
+            part.addEventListener('pointermove', positionChartTooltip);
+            part.addEventListener('pointerleave', hideChartTooltip);
+            stack.append(part);
+          }
+
+          area.append(stack);
+          column.append(area);
+
+          const tick = document.createElement('span');
+          tick.className = 'chart-tick';
+          if (index % labelStep === 0 || index === buckets.length - 1) {
+            tick.textContent = bucketLabel(data.bucket, bucket.start);
+            tick.title = bucketTitle(data.bucket, bucket.start);
+          }
+          column.append(tick);
+          bars.append(column);
+        }
+
+        const legend = $('legend');
+        legend.textContent = '';
+        const legendModels = [...data.models]
+          .filter((model) => valueOf(model) > 0)
+          .sort((a, b) => valueOf(b) - valueOf(a));
+        for (const model of legendModels) {
+          const item = document.createElement('span');
+          item.className = 'legend-item';
+
+          const swatch = document.createElement('span');
+          swatch.className = 'swatch';
+          swatch.style.background = colorFor(model.model, model.provider);
+          item.append(swatch);
+
+          const name = document.createElement('span');
+          name.textContent = model.model;
+          item.append(name);
+
+          if (model.provider) {
+            const provider = document.createElement('span');
+            provider.className = 'sub';
+            provider.textContent = model.provider;
+            item.append(provider);
+          }
+
+          const total = document.createElement('span');
+          total.className = 'legend-total';
+          total.textContent = describeValue(valueOf(model));
+          item.append(total);
+
+          legend.append(item);
+        }
+      }
+
       function render(data) {
         const s = data.summary;
         $('totalCost').textContent = usd(s.totalCostUsd);
@@ -409,6 +962,7 @@
         )} completion`;
         $('latency').textContent = `${Math.round(s.avgDurationMs)} ms`;
         $('latencyNote').textContent = `${count(s.streamed)} streamed`;
+        renderChart(data);
         renderModels(data.models);
         $('updated').textContent = `Updated ${new Date().toLocaleTimeString()} · range starts ${new Date(
           data.range.from,
@@ -418,6 +972,8 @@
       async function load() {
         const params = new URLSearchParams({
           hours: String(state.hours),
+          bucket: state.bucket,
+          metric: state.metric,
           includeSubscription: state.includeSub ? '1' : '0',
         });
         const response = await fetch(`/api/usage?${params}`);
@@ -436,6 +992,16 @@
 
       $('range').addEventListener('change', (event) => {
         state.hours = Number(event.target.value);
+        refresh();
+      });
+
+      $('bucket').addEventListener('change', (event) => {
+        state.bucket = event.target.value;
+        refresh();
+      });
+
+      $('metric').addEventListener('change', (event) => {
+        state.metric = event.target.value;
         refresh();
       });
 

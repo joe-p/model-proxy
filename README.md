@@ -933,8 +933,8 @@ Notes for a consumer that stores these rows:
 
 `examples/dashboard/` contains a runnable TypeScript collector that accepts
 this stream over `POST /ingest` (or from stdout) and stores it in SQLite, then
-serves a dashboard with cost totals, a subscription estimate toggle, and a
-per-model breakdown.
+serves a dashboard with cost totals, a subscription estimate toggle, a stacked
+cost/token chart with day/week/month buckets, and a per-model breakdown.
 
 ## Reload and shutdown
 

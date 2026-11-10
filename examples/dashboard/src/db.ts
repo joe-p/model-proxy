@@ -1,5 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { AccessLog } from './parse.js';
+import {
+  bucketSqlExpression,
+  bucketStartFromKey,
+  type Bucket,
+} from './time.js';
 
 export interface Summary {
   requests: number;
@@ -24,6 +29,10 @@ export interface ModelRow {
   reportedCostUsd: number;
   subscriptionEstimateUsd: number;
   apiEstimateUsd: number;
+}
+
+export interface TimeseriesRow extends ModelRow {
+  bucketStartMs: number;
 }
 
 const SCHEMA = `
@@ -111,6 +120,29 @@ WHERE ts_ms >= ? AND ts_ms < ?
 GROUP BY model, provider
 `;
 
+function timeseriesSql(bucket: Bucket): string {
+  const bucketKey = bucketSqlExpression(bucket);
+  return `
+SELECT
+  ${bucketKey} AS bucket_key,
+  COALESCE(alias, upstream_model, 'unknown') AS model,
+  COALESCE(provider, '') AS provider,
+  COUNT(*) AS requests,
+  COALESCE(SUM(CASE WHEN status >= 400 OR error_code IS NOT NULL THEN 1 ELSE 0 END), 0) AS errors,
+  COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+  COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+  COALESCE(SUM(cost_usd), 0) AS reported_cost_usd,
+  COALESCE(SUM(CASE WHEN cost_usd IS NULL AND billing_mode = 'subscription'
+                    THEN estimated_api_cost_usd ELSE 0 END), 0) AS subscription_estimate_usd,
+  COALESCE(SUM(CASE WHEN cost_usd IS NULL AND COALESCE(billing_mode, '') <> 'subscription'
+                    THEN estimated_api_cost_usd ELSE 0 END), 0) AS api_estimate_usd
+FROM usage
+WHERE ts_ms >= ? AND ts_ms < ?
+GROUP BY bucket_key, model, provider
+ORDER BY bucket_key, model, provider
+`;
+}
+
 type Row = Record<string, string | number | null>;
 
 function n(value: string | number | null | undefined): number {
@@ -126,6 +158,7 @@ export class UsageStore {
   private readonly insertStmt: ReturnType<DatabaseSync['prepare']>;
   private readonly summaryStmt: ReturnType<DatabaseSync['prepare']>;
   private readonly modelsStmt: ReturnType<DatabaseSync['prepare']>;
+  private readonly timeseriesStmts: Record<Bucket, ReturnType<DatabaseSync['prepare']>>;
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -136,6 +169,11 @@ export class UsageStore {
     this.insertStmt = this.db.prepare(INSERT);
     this.summaryStmt = this.db.prepare(SUMMARY);
     this.modelsStmt = this.db.prepare(MODELS);
+    this.timeseriesStmts = {
+      day: this.db.prepare(timeseriesSql('day')),
+      week: this.db.prepare(timeseriesSql('week')),
+      month: this.db.prepare(timeseriesSql('month')),
+    };
   }
 
   insertMany(rows: AccessLog[]): void {
@@ -206,6 +244,28 @@ export class UsageStore {
       subscriptionEstimateUsd: n(row.subscription_estimate_usd),
       apiEstimateUsd: n(row.api_estimate_usd),
     }));
+  }
+
+  timeseries(fromMs: number, toMs: number, bucket: Bucket): TimeseriesRow[] {
+    const rows = this.timeseriesStmts[bucket].all(fromMs, toMs) as unknown as Row[];
+    const result: TimeseriesRow[] = [];
+    for (const row of rows) {
+      const bucketStartMs = bucketStartFromKey(bucket, String(row.bucket_key ?? ''));
+      if (!Number.isFinite(bucketStartMs)) continue;
+      result.push({
+        bucketStartMs,
+        model: s(row.model) || 'unknown',
+        provider: s(row.provider),
+        requests: n(row.requests),
+        errors: n(row.errors),
+        promptTokens: n(row.prompt_tokens),
+        completionTokens: n(row.completion_tokens),
+        reportedCostUsd: n(row.reported_cost_usd),
+        subscriptionEstimateUsd: n(row.subscription_estimate_usd),
+        apiEstimateUsd: n(row.api_estimate_usd),
+      });
+    }
+    return result;
   }
 
   close(): void {

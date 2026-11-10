@@ -4,8 +4,14 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import type { ModelRow, Summary, UsageStore } from './db.js';
+import type { ModelRow, Summary, TimeseriesRow, UsageStore } from './db.js';
 import { parseRecord, type AccessLog } from './parse.js';
+import {
+  nextBucketStart,
+  parseBucket,
+  startOfBucket,
+  type Bucket,
+} from './time.js';
 
 interface Costed {
   reportedCostUsd: number;
@@ -14,6 +20,14 @@ interface Costed {
 }
 
 type WithTotal<T> = T & { totalCostUsd: number };
+
+type Metric = 'cost' | 'tokens';
+
+interface TimeseriesBucket {
+  start: string;
+  end: string;
+  segments: WithTotal<ModelRow>[];
+}
 
 const MAX_INGEST_BYTES = 8 * 1024 * 1024;
 
@@ -34,6 +48,74 @@ function withTotal<T extends Costed>(row: T, includeSubscription: boolean): With
     row.apiEstimateUsd +
     (includeSubscription ? row.subscriptionEstimateUsd : 0);
   return { ...row, totalCostUsd };
+}
+
+function modelKey(model: string, provider: string): string {
+  return `${model}\u0000${provider}`;
+}
+
+function modelMetric(row: WithTotal<ModelRow>, metric: Metric): number {
+  return metric === 'tokens' ? row.promptTokens + row.completionTokens : row.totalCostUsd;
+}
+
+function toSegment(row: TimeseriesRow, includeSubscription: boolean): WithTotal<ModelRow> {
+  return withTotal(
+    {
+      model: row.model,
+      provider: row.provider,
+      requests: row.requests,
+      errors: row.errors,
+      promptTokens: row.promptTokens,
+      completionTokens: row.completionTokens,
+      reportedCostUsd: row.reportedCostUsd,
+      subscriptionEstimateUsd: row.subscriptionEstimateUsd,
+      apiEstimateUsd: row.apiEstimateUsd,
+    },
+    includeSubscription,
+  );
+}
+
+function buildTimeseries(
+  rows: TimeseriesRow[],
+  fromMs: number,
+  toMs: number,
+  bucket: Bucket,
+  includeSubscription: boolean,
+  modelOrder: Map<string, number>,
+): TimeseriesBucket[] {
+  const byStart = new Map<number, TimeseriesRow[]>();
+  for (const row of rows) {
+    const list = byStart.get(row.bucketStartMs);
+    if (list) list.push(row);
+    else byStart.set(row.bucketStartMs, [row]);
+  }
+
+  const buckets: TimeseriesBucket[] = [];
+  const last = startOfBucket(bucket, toMs);
+  for (
+    let start = startOfBucket(bucket, fromMs);
+    start <= last;
+    start = nextBucketStart(bucket, start)
+  ) {
+    const segments = (byStart.get(start) ?? [])
+      .map((row) => toSegment(row, includeSubscription))
+      .sort((a, b) => {
+        const rankA = modelOrder.get(modelKey(a.model, a.provider)) ?? Number.MAX_SAFE_INTEGER;
+        const rankB = modelOrder.get(modelKey(b.model, b.provider)) ?? Number.MAX_SAFE_INTEGER;
+        return (
+          rankA - rankB ||
+          a.model.localeCompare(b.model) ||
+          a.provider.localeCompare(b.provider)
+        );
+      });
+
+    buckets.push({
+      start: new Date(start).toISOString(),
+      end: new Date(nextBucketStart(bucket, start)).toISOString(),
+      segments,
+    });
+  }
+  return buckets;
 }
 
 let cachedHtml: string | undefined;
@@ -60,8 +142,14 @@ function parseHours(raw: string | null): number {
   return Math.min(Math.max(Math.trunc(value), 1), 24 * 365);
 }
 
+function parseMetric(raw: string | null): Metric {
+  return raw === 'tokens' ? 'tokens' : 'cost';
+}
+
 function handleUsage(store: UsageStore, res: ServerResponse, url: URL): void {
   const hours = parseHours(url.searchParams.get('hours'));
+  const bucket = parseBucket(url.searchParams.get('bucket'));
+  const metric = parseMetric(url.searchParams.get('metric'));
   const includeSubscription =
     url.searchParams.get('includeSubscription') === '1' ||
     url.searchParams.get('includeSubscription') === 'true';
@@ -75,15 +163,32 @@ function handleUsage(store: UsageStore, res: ServerResponse, url: URL): void {
     .map((row) => withTotal(row, includeSubscription))
     .sort((a, b) => b.totalCostUsd - a.totalCostUsd);
 
+  const modelOrder = new Map(
+    [...models]
+      .sort((a, b) => modelMetric(b, metric) - modelMetric(a, metric))
+      .map((row, index) => [modelKey(row.model, row.provider), index]),
+  );
+  const timeseries = buildTimeseries(
+    store.timeseries(fromMs, toMs, bucket),
+    fromMs,
+    toMs,
+    bucket,
+    includeSubscription,
+    modelOrder,
+  );
+
   sendJson(res, 200, {
     range: {
       hours,
       from: new Date(fromMs).toISOString(),
       to: new Date(toMs).toISOString(),
     },
+    bucket,
+    metric,
     includeSubscription,
     summary,
     models,
+    timeseries,
   });
 }
 

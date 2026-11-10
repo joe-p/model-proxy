@@ -17,8 +17,8 @@ interface Options {
 const HELP = `model-proxy usage dashboard
 
 Accepts model-proxy JSON access records over POST /ingest or stdout, stores
-them in SQLite, and serves a dashboard with cost totals and a per-model
-breakdown.
+them in SQLite, and serves a dashboard with cost totals, a stacked cost/token
+chart, and a per-model breakdown.
 
 Usage:
   npm start -- [options]                         serve dashboard + POST /ingest
