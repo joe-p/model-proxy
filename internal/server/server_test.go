@@ -1,0 +1,456 @@
+package server_test
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/joe-p/model-proxy/internal/config"
+	"github.com/joe-p/model-proxy/internal/provider"
+	"github.com/joe-p/model-proxy/internal/provider/openrouter"
+	"github.com/joe-p/model-proxy/internal/server"
+)
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func newTestProxy(t *testing.T, upstreamURL string, tweak func(*config.Config)) (*httptest.Server, *lockedBuffer) {
+	t.Helper()
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Listen:            "127.0.0.1:0",
+			MaxBodyBytes:      1 << 20,
+			ReadHeaderTimeout: time.Second,
+			ShutdownTimeout:   time.Second,
+		},
+		Logging: config.LoggingConfig{Format: "json", Level: slog.LevelDebug, LogUsage: true},
+		Auth:    config.AuthConfig{Enabled: true},
+		Keys:    []config.VirtualKey{{Name: "test", Key: "test-key"}},
+		Providers: map[string]config.ProviderConfig{
+			"openrouter": {
+				Name:                  "openrouter",
+				BaseURL:               upstreamURL,
+				APIKey:                "upstream-key",
+				DialTimeout:           time.Second,
+				ResponseHeaderTimeout: time.Second,
+				Referer:               "https://example.test",
+				Title:                 "model-proxy-test",
+			},
+		},
+		Models: map[string]config.ModelConfig{
+			"fast":  {Alias: "fast", Provider: "openrouter", Upstream: "openai/gpt-4o-mini"},
+			"smart": {Alias: "smart", Provider: "openrouter", Upstream: "anthropic/claude-sonnet-4"},
+		},
+	}
+	if tweak != nil {
+		tweak(cfg)
+	}
+
+	logBuf := &lockedBuffer{}
+	logger := slog.New(slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	providerCfg := cfg.Providers["openrouter"]
+	p, err := openrouter.New(
+		providerCfg.Name,
+		providerCfg.BaseURL,
+		providerCfg.APIKey,
+		providerCfg.DialTimeout,
+		providerCfg.ResponseHeaderTimeout,
+		providerCfg.Referer,
+		providerCfg.Title,
+	)
+	if err != nil {
+		t.Fatalf("openrouter.New: %v", err)
+	}
+
+	srv := server.New(cfg, map[string]provider.Provider{"openrouter": p}, logger)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+	return ts, logBuf
+}
+
+func waitForLog(t *testing.T, buf *lockedBuffer, substring string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(buf.String(), substring) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("log did not contain %q; logs:\n%s", substring, buf.String())
+}
+
+func postChat(t *testing.T, proxyURL, key, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, proxyURL+"/v1/chat/completions?foo=bar", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Request-ID", "client-request-id")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do request: %v", err)
+	}
+	return resp
+}
+
+func TestModelsRequiresAuthAndListsSortedAliases(t *testing.T) {
+	proxy, _ := newTestProxy(t, "http://127.0.0.1:1", nil)
+
+	resp, err := http.Get(proxy.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models with auth: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			Object  string `json:"object"`
+			Owner   string `json:"owned_by"`
+			Created int64  `json:"created"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if payload.Object != "list" || len(payload.Data) != 2 {
+		t.Fatalf("unexpected models payload: %+v", payload)
+	}
+	if payload.Data[0].ID != "fast" || payload.Data[1].ID != "smart" {
+		t.Fatalf("models not sorted: %+v", payload.Data)
+	}
+	if payload.Data[0].Object != "model" || payload.Data[0].Owner != "model-proxy" || payload.Data[0].Created == 0 {
+		t.Fatalf("unexpected model metadata: %+v", payload.Data[0])
+	}
+}
+
+func TestChatRewritesModelAndPassesResponseThrough(t *testing.T) {
+	const responseBody = `{"id":"chatcmpl-1","model":"openai/gpt-4o-mini","usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.0001},"choices":[]}`
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		if r.Method != http.MethodPost {
+			t.Errorf("upstream method = %s", r.Method)
+		}
+		if r.URL.Path != "/chat/completions" {
+			t.Errorf("upstream path = %s", r.URL.Path)
+		}
+		if r.URL.RawQuery != "foo=bar" {
+			t.Errorf("upstream query = %q", r.URL.RawQuery)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer upstream-key" {
+			t.Errorf("upstream authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Request-ID"); got != "client-request-id" {
+			t.Errorf("upstream request id = %q", got)
+		}
+		if got := r.Header.Get("HTTP-Referer"); got != "https://example.test" {
+			t.Errorf("upstream referer = %q", got)
+		}
+		if got := r.Header.Get("X-Title"); got != "model-proxy-test" {
+			t.Errorf("upstream title = %q", got)
+		}
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("upstream accept = %q", got)
+		}
+
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		var model string
+		_ = json.Unmarshal(fields["model"], &model)
+		if model != "openai/gpt-4o-mini" {
+			t.Errorf("upstream model = %q", model)
+		}
+		if _, ok := fields["provider"]; !ok {
+			t.Errorf("provider field was not passed through")
+		}
+		if _, ok := fields["messages"]; !ok {
+			t.Errorf("messages field was not passed through")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Upstream", "yes")
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxy(t, upstream.URL, nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[{"role":"user","content":"hi"}],"stream":false,"provider":{"order":["x"]}}`)
+	defer resp.Body.Close()
+	gotBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, gotBody)
+	}
+	if string(gotBody) != responseBody {
+		t.Fatalf("body changed:\nwant %s\ngot  %s", responseBody, gotBody)
+	}
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("upstream calls = %d", upstreamCalls.Load())
+	}
+	if got := resp.Header.Get("X-Model-Proxy-Alias"); got != "fast" {
+		t.Fatalf("alias header = %q", got)
+	}
+	if got := resp.Header.Get("X-Model-Proxy-Upstream"); got != "openai/gpt-4o-mini" {
+		t.Fatalf("upstream header = %q", got)
+	}
+	if got := resp.Header.Get("X-Upstream"); got != "yes" {
+		t.Fatalf("upstream response header not copied: %q", got)
+	}
+	if got := resp.Header.Get("X-Request-ID"); got != "client-request-id" {
+		t.Fatalf("request id header = %q", got)
+	}
+
+	waitForLog(t, logs, `"cost_usd":0.0001`)
+	waitForLog(t, logs, `"total_tokens":15`)
+	waitForLog(t, logs, `"alias":"fast"`)
+}
+
+func TestChatPassesThroughUpstreamError(t *testing.T) {
+	const errorBody = `{"error":{"message":"rate limited","type":"rate_limit"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(errorBody))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if string(body) != errorBody {
+		t.Fatalf("error body changed: %s", body)
+	}
+}
+
+func TestChatRejectsForbiddenFields(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"models":["anthropic/claude-opus"]}`)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("upstream should not have been called")
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&envelope)
+	if envelope.Error.Code != "invalid_request" {
+		t.Fatalf("error code = %q", envelope.Error.Code)
+	}
+}
+
+func TestChatRejectsUnknownModelAndInvalidKey(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream should not have been called")
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, nil)
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"unknown","messages":[]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown model status = %d", resp.StatusCode)
+	}
+
+	resp2 := postChat(t, proxy.URL, "wrong-key", `{"model":"fast","messages":[]}`)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("invalid key status = %d", resp2.StatusCode)
+	}
+}
+
+func TestChatRejectsOversizedBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("upstream should not have been called")
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		cfg.Server.MaxBodyBytes = 16
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[{"role":"user","content":"this is too long"}]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}
+
+func TestChatStreamingIsByteTransparentAndLogsUsage(t *testing.T) {
+	const streamBody = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"id\":\"1\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":3,\"total_tokens\":5,\"cost\":0.00002}}\n\n" +
+		"data: [DONE]\n\n"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		for _, line := range strings.SplitAfter(streamBody, "\n") {
+			_, _ = w.Write([]byte(line))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	proxy, logs := newTestProxy(t, upstream.URL, nil)
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":true}`)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if string(body) != streamBody {
+		t.Fatalf("stream changed:\nwant %q\ngot  %q", streamBody, body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("content type = %q", got)
+	}
+	waitForLog(t, logs, `"cost_usd":0.00002`)
+	waitForLog(t, logs, `"stream":true`)
+}
+
+func TestUpstreamTimeoutReturns504(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		providerCfg := cfg.Providers["openrouter"]
+		providerCfg.ResponseHeaderTimeout = 20 * time.Millisecond
+		cfg.Providers["openrouter"] = providerCfg
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusGatewayTimeout {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&envelope)
+	if envelope.Error.Code != "upstream_timeout" {
+		t.Fatalf("error code = %q", envelope.Error.Code)
+	}
+}
+
+func TestReloadSwapsConfigAndRejectsListenerChange(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Listen:            "127.0.0.1:0",
+			MaxBodyBytes:      1 << 20,
+			ReadHeaderTimeout: time.Second,
+			ShutdownTimeout:   time.Second,
+		},
+		Logging: config.LoggingConfig{Format: "text", Level: slog.LevelDebug, LogUsage: true},
+		Auth:    config.AuthConfig{Enabled: false},
+		Models: map[string]config.ModelConfig{
+			"fast": {Alias: "fast", Provider: "openrouter", Upstream: "openai/gpt-4o-mini"},
+		},
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(cfg, nil, logger)
+	ts := httptest.NewServer(srv)
+	defer ts.Close()
+
+	reloaded := *cfg
+	reloaded.Models = map[string]config.ModelConfig{
+		"new": {Alias: "new", Provider: "openrouter", Upstream: "openai/gpt-4o"},
+	}
+	if err := srv.Reload(&reloaded, nil, logger); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+
+	resp, err := http.Get(ts.URL + "/v1/models")
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	if len(payload.Data) != 1 || payload.Data[0].ID != "new" {
+		t.Fatalf("reload did not swap models: %+v", payload.Data)
+	}
+
+	bad := reloaded
+	bad.Server.Listen = "127.0.0.1:1"
+	if err := srv.Reload(&bad, nil, logger); err == nil {
+		t.Fatal("expected listener change to be rejected")
+	}
+}
