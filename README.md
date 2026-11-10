@@ -10,7 +10,8 @@ provider.
 - `POST /v1/chat/completions`, streaming and non-streaming.
 - `GET /v1/models` backed by a strict alias registry.
 - `GET /healthz` liveness endpoint.
-- JSON configuration with strict unknown-field rejection.
+- JWCC configuration (JSON with comments and trailing commas) with strict
+  unknown-field rejection.
 - Virtual keys loaded from environment variables, with optional `.env` support.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
@@ -64,88 +65,116 @@ curl http://127.0.0.1:8080/v1/models \
 
 ## Configuration
 
-See [`config.example.json`](./config.example.json) for a complete example. JSON
-does not support comments, so the rules below document the schema. The example
-shows both policy modes, a key without a policy, provider/model `extra_body`,
-and optional OpenRouter attribution headers.
+See [`config.example.json`](./config.example.json) for a complete example. The
+config is JWCC (JSON with Commas and Comments): `//` line comments, `/* */`
+block comments, and trailing commas are accepted. The example shows both policy
+modes, a key without a policy, provider/model `extra_body`, and optional
+OpenRouter attribution headers.
 
-```json
+```jsonc
+// model-proxy configuration.
+//
+// This is JWCC (JSON with comments and trailing commas). Unknown fields are
+// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are never
+// placed directly in this file; key_env names are resolved from the process
+// environment first, then from env_file.
 {
-  "env_file": ".env",
+  "env_file": ".env", // Optional; relative paths are resolved from this file.
+
   "server": {
     "listen": "127.0.0.1:8080",
     "max_body_bytes": 1048576,
     "read_header_timeout": "10s",
-    "shutdown_timeout": "15s"
+    "shutdown_timeout": "15s",
   },
+
   "logging": {
-    "format": "json",
-    "level": "info",
-    "log_usage": true
+    "format": "json", // json | text
+    "level": "info",  // debug | info | warn | error
+    "log_usage": true,
   },
+
   "auth": {
-    "enabled": true
+    "enabled": true, // When enabled, at least one virtual key must resolve.
   },
+
+  // A virtual key's "policy" is optional. Keys without a policy may use every
+  // configured model alias.
   "virtual_keys": [
     {
       "name": "laptop",
       "key_env": "PROXY_KEY_LAPTOP",
-      "policy": "basic"
+      "policy": "basic",
     },
     {
       "name": "ci",
       "key_env": "PROXY_KEY_CI",
-      "policy": "no-smart"
+      "policy": "no-smart",
     },
     {
       "name": "admin",
-      "key_env": "PROXY_KEY_ADMIN"
-    }
+      "key_env": "PROXY_KEY_ADMIN",
+    },
   ],
+
+  // Policies restrict which model aliases a virtual key may use. "mode" is
+  // "whitelist" (only listed aliases) or "blacklist" (all but listed aliases).
+  // Model entries refer to keys from "models" below.
   "policies": [
     {
       "name": "basic",
       "mode": "whitelist",
-      "models": ["fast"]
+      "models": ["fast"],
     },
     {
       "name": "no-smart",
       "mode": "blacklist",
-      "models": ["smart"]
-    }
+      "models": ["smart"],
+    },
   ],
+
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "dial_timeout": "10s",
       "response_header_timeout": "120s",
+
+      // Optional OpenRouter app-attribution headers.
       "referer": "https://example.com",
       "title": "model-proxy",
+
+      // Optional defaults injected into every upstream request body for models
+      // using this provider. These are body fields, not HTTP headers.
       "extra_body": {
         "provider": {
           "zdr": true,
-          "data_collection": "deny"
-        }
-      }
-    }
+          "data_collection": "deny",
+        },
+      },
+    },
   },
+
   "models": {
+    // The model key is the alias clients send in the "model" field.
     "fast": {
       "provider": "openrouter",
       "upstream": "openai/gpt-4o-mini",
+
+      // Model-level extra_body values override provider-level values. Nested
+      // objects such as OpenRouter's "provider" object are merged recursively.
       "extra_body": {
         "provider": {
           "order": ["openai"],
-          "allow_fallbacks": false
-        }
-      }
+          "allow_fallbacks": false,
+        },
+      },
     },
     "smart": {
       "provider": "openrouter",
-      "upstream": "anthropic/claude-sonnet-4"
-    }
-  }
+      "upstream": "anthropic/claude-sonnet-4",
+    },
+  },
 }
 ```
 
@@ -162,7 +191,7 @@ Rules:
 - Policies require a non-empty `name`, a `mode` of `whitelist` or `blacklist`,
   and a non-empty `models` list of configured aliases. Policy names must be
   unique, and every key `policy` reference must exist.
-- Unknown JSON fields, duplicate virtual key names, duplicate resolved key
+- Unknown configuration fields, duplicate virtual key names, duplicate resolved key
   values, missing environment variables, invalid URLs, and zero models fail
   startup.
 - `server.listen` and `read_header_timeout` changes require a restart; other

@@ -102,6 +102,36 @@ func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsCommentsAndTrailingCommas(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  // Line comments are ignored.
+  "auth": {"enabled": true}, /* Block comments are ignored too. */
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"},
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1", // "//" inside strings is preserved
+      "api_key_env": "OPENROUTER_KEY",
+    },
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"},
+  },
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["openrouter"].BaseURL; got != "https://openrouter.ai/api/v1" {
+		t.Fatalf("unexpected base URL: %q", got)
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config.json", `{
@@ -135,8 +165,8 @@ func TestLoadRejectsTrailingData(t *testing.T) {
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "trailing data") {
-		t.Fatalf("expected trailing data error, got %v", err)
+	if err == nil {
+		t.Fatal("expected trailing data error")
 	}
 }
 

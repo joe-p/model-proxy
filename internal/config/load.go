@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/joho/godotenv"
+	"github.com/tailscale/hujson"
 )
 
 type rawConfig struct {
@@ -67,10 +67,10 @@ type rawModel struct {
 	ExtraBody map[string]any `json:"extra_body"`
 }
 
-// Load reads, resolves, and validates a JSON configuration file. An optional
-// env_file, relative to the config file, is loaded before key_env references
-// are resolved. Real process environment variables take precedence over values
-// from the env file.
+// Load reads, resolves, and validates a JWCC (JSON with comments and trailing
+// commas) configuration file. An optional env_file, relative to the config
+// file, is loaded before key_env references are resolved. Real process
+// environment variables take precedence over values from the env file.
 func Load(path string) (*Config, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -82,15 +82,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", abs, err)
 	}
 
+	standard, err := hujson.Standardize(data)
+	if err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", abs, err)
+	}
+
 	var raw rawConfig
-	dec := json.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(bytes.NewReader(standard))
 	dec.DisallowUnknownFields()
 	dec.UseNumber()
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", abs, err)
-	}
-	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
-		return nil, fmt.Errorf("parse config %s: unexpected trailing data", abs)
 	}
 
 	envPath := ""

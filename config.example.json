@@ -1,19 +1,31 @@
+// model-proxy configuration.
+//
+// This is JWCC (JSON with comments and trailing commas). Unknown fields are
+// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are never
+// placed directly in this file; key_env names are resolved from the process
+// environment first, then from env_file.
 {
-  "env_file": ".env",
+  "env_file": ".env", // Optional; relative paths are resolved from this file.
+
   "server": {
     "listen": "127.0.0.1:8080",
     "max_body_bytes": 1048576,
     "read_header_timeout": "10s",
     "shutdown_timeout": "15s"
   },
+
   "logging": {
-    "format": "json",
-    "level": "info",
+    "format": "json", // json | text
+    "level": "info", // debug | info | warn | error
     "log_usage": true
   },
+
   "auth": {
-    "enabled": true
+    "enabled": true // When enabled, at least one virtual key must resolve.
   },
+
+  // A virtual key's "policy" is optional. Keys without a policy may use every
+  // configured model alias.
   "virtual_keys": [
     {
       "name": "laptop",
@@ -30,6 +42,10 @@
       "key_env": "PROXY_KEY_ADMIN"
     }
   ],
+
+  // Policies restrict which model aliases a virtual key may use. "mode" is
+  // "whitelist" (only listed aliases) or "blacklist" (all but listed aliases).
+  // Model entries refer to keys from "models" below.
   "policies": [
     {
       "name": "basic",
@@ -42,14 +58,20 @@
       "models": ["smart"]
     }
   ],
+
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "dial_timeout": "10s",
       "response_header_timeout": "120s",
+
+      // Optional OpenRouter app-attribution headers.
       "referer": "https://example.com",
       "title": "model-proxy",
+
+      // Optional defaults injected into every upstream request body for models
+      // using this provider. These are body fields, not HTTP headers.
       "extra_body": {
         "provider": {
           "zdr": true,
@@ -58,10 +80,15 @@
       }
     }
   },
+
   "models": {
+    // The model key is the alias clients send in the "model" field.
     "fast": {
       "provider": "openrouter",
       "upstream": "openai/gpt-4o-mini",
+
+      // Model-level extra_body values override provider-level values. Nested
+      // objects such as OpenRouter's "provider" object are merged recursively.
       "extra_body": {
         "provider": {
           "order": ["openai"],
