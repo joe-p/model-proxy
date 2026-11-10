@@ -788,7 +788,7 @@ their status but their body is rewritten into the same envelope with
 
 ### Logging
 
-Logs go to stderr as JSON by default. Access-log fields include request ID,
+Logs go to stdout as JSON by default. Access-log fields include request ID,
 method, path, status, latency, bytes out, user agent, key name, the key's active
 policy (`policy`, `policy_mode`, and `policy_models`), alias, provider,
 billing mode, upstream model, stream flag, error code, and client-cancellation
@@ -817,6 +817,69 @@ also includes `estimated_api_cost_usd` and `pricing_source`. This is a
 models.dev or configured list-price estimate, not actual subscription billing.
 
 Secrets, prompts, and response bodies are never logged.
+
+#### Usage log schema
+
+With `logging.format` set to `json`, every request produces one line-delimited
+JSON object on stdout. Access records have `msg` equal to `request` and are
+emitted at `INFO`, except `/healthz`, which is `DEBUG`. A log consumer should
+filter on `msg == "request"` and skip other records (startup, reload, and
+internal errors share the same stream).
+
+| Field | Type | Present | Meaning |
+| --- | --- | --- | --- |
+| `time` | string (RFC 3339) | always | Emit time, added by the JSON handler. |
+| `level` | string | always | `INFO` or `DEBUG` (see above). |
+| `msg` | string | always | `request` for access records. |
+| `request_id` | string | always | Also returned as `X-Request-ID`; use as the dedupe key. |
+| `method` | string | always | HTTP method. |
+| `path` | string | always | Request path as received. |
+| `status` | int | always | HTTP status; `499` means the client closed the request. |
+| `duration_ms` | float | always | Wall time from dispatch to completion. |
+| `bytes_out` | int | always | Response bytes written. |
+| `remote_addr` | string | when known | Client address. |
+| `user_agent` | string | when known | Client user agent, or the key's `user_agent` override. |
+| `key_name` | string | when authenticated | Virtual key that authorized the request. |
+| `policy` | string | when the key has a policy | Attached policy name. |
+| `policy_mode` | string | when the key has a policy | `whitelist` or `blacklist`. |
+| `policy_models` | string[] | when the key has a policy | Policy's model list. |
+| `alias` | string | when resolved | Requested model alias. |
+| `provider` | string | when resolved | Configured provider name. |
+| `billing_mode` | string | when set | For example `subscription`; see below. |
+| `upstream_model` | string | when resolved | Model id sent upstream. |
+| `passthrough` | bool | when true | Request used a passthrough route. |
+| `dropped_fields` | string[] | when non-empty | Request fields removed before the upstream call. |
+| `stream` | bool | when true | Response was streamed. |
+| `error_code` | string | on proxy-generated errors | Machine-readable error code. |
+| `error` | string | on proxy-generated errors | Human-readable error detail. |
+| `client_canceled` | bool | when true | Client disconnected before completion. |
+| `prompt_tokens` | int | when usage observed | Input tokens. |
+| `completion_tokens` | int | when usage observed | Output tokens. |
+| `total_tokens` | int | when usage observed | Total tokens. |
+| `cost_usd` | float | when the upstream reports it | Upstream `usage.cost`; OpenRouter credits are 1:1 with USD. |
+| `estimated_api_cost_usd` | float | when an estimate exists | List-price estimate; not a charge. |
+| `pricing_source` | string | with an estimate | Catalog the estimate came from, for example `models.dev`. |
+| `cache_discount` | float | when the upstream reports it | Upstream `usage.cache_discount`. |
+| `cached_tokens` | int | when the upstream reports it | From `usage.prompt_tokens_details.cached_tokens`; `0` is a cache miss. |
+| `cache_write_tokens` | int | when the upstream reports it | From `usage.prompt_tokens_details.cache_write_tokens`. |
+| `reasoning_tokens` | int | when the upstream reports it | From `usage.completion_tokens_details.reasoning_tokens`. |
+
+Boolean fields are logged only when true, so their absence means false. Fields
+the upstream omits are not logged at all, so an absent token count means
+"not observed" — an error, a non-usage endpoint, or `log_usage` disabled — not
+a zero. Cache values are logged as reported, including `0`.
+
+Notes for a consumer that stores these rows:
+
+- Read stdout and parse one JSON object per line.
+- Deduplicate on `request_id`. Log shipping can retry, and a unique
+  constraint plus an idempotent insert avoids double-counting usage.
+- Keep `cost_usd` and `estimated_api_cost_usd` in separate columns. Either may
+  be present without the other, and the estimate is a list price, not billing.
+- Records are not guaranteed to arrive in timestamp order across concurrent
+  requests. Sort by `time`, not by arrival.
+- `billing_mode: subscription` means token usage did not incur per-token cost,
+  so a missing `cost_usd` is expected.
 
 ## Reload and shutdown
 

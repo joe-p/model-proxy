@@ -44,7 +44,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stderr)
+	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
 	providers, err := buildProviders(cfg)
 	if err != nil {
 		return err
@@ -115,7 +115,7 @@ func reload(srv *server.Server, path string) (context.CancelFunc, error) {
 	if err != nil {
 		return nil, err
 	}
-	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stderr)
+	logger := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
 	pricingSvc, pricingCancel := startPricing(cfg, logger)
 	if err := srv.Reload(cfg, providers, logger, costEstimator(pricingSvc)); err != nil {
 		if pricingCancel != nil {
