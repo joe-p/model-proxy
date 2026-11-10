@@ -24,6 +24,12 @@
     "enabled": true // When enabled, at least one virtual key must resolve.
   },
 
+  // Expose /claude_sub/ for Claude Code subscription logins. The client sends
+  // its own OAuth token, which the proxy forwards to
+  // https://api.anthropic.com. No provider, model, or Claude credential is
+  // configured here. When true, an empty "models" block is allowed.
+  "enable_claude_subscription": false,
+
   // Optional list-price estimates from models.dev. The catalog is cached on
   // disk and refreshed in the background. Omit this block to disable estimates.
   "pricing": {

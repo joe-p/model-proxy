@@ -878,6 +878,53 @@ func TestLoadCodexBillingModeDefaultsToSubscription(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesClaudeSubscriptionWithoutModels(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "enable_claude_subscription": true
+}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.EnableClaudeSubscription {
+		t.Fatal("claude subscription was not enabled")
+	}
+	if len(cfg.Models) != 0 {
+		t.Fatalf("models = %d, want 0", len(cfg.Models))
+	}
+	if len(cfg.Providers) != 0 {
+		t.Fatalf("providers = %d, want 0", len(cfg.Providers))
+	}
+}
+
+func TestLoadClaudeSubscriptionDefaultsToDisabled(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.EnableClaudeSubscription {
+		t.Fatal("claude subscription should default to disabled")
+	}
+}
+
 func TestLoadRejectsAuthDirForNonCodexProvider(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config.json", `{

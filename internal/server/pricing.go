@@ -18,14 +18,7 @@ func applyEstimatedCost(lr *requestLog, st *state, model config.ModelConfig) {
 		return
 	}
 
-	usage := pricing.Usage{
-		PromptTokens:     lr.usage.PromptTokens,
-		CompletionTokens: lr.usage.CompletionTokens,
-	}
-	if details := lr.usage.PromptTokensDetails; details != nil {
-		usage.CachedTokens = details.CachedTokens
-		usage.CacheWriteTokens = details.CacheWriteTokens
-	}
+	usage := usageForPricing(lr.usage)
 
 	if model.Pricing != nil {
 		rates := pricing.Rates{
@@ -56,4 +49,21 @@ func applyEstimatedCost(lr *requestLog, st *state, model config.ModelConfig) {
 	}
 	lr.estimatedCost = &cost
 	lr.pricingSource = "models.dev"
+}
+
+// usageForPricing converts the access-log usage shape into the token counters
+// the pricing service expects.
+func usageForPricing(u *usage) pricing.Usage {
+	if u == nil {
+		return pricing.Usage{}
+	}
+	out := pricing.Usage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+	}
+	if details := u.PromptTokensDetails; details != nil {
+		out.CachedTokens = details.CachedTokens
+		out.CacheWriteTokens = details.CacheWriteTokens
+	}
+	return out
 }

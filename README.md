@@ -5,7 +5,8 @@ OpenAI-compatible upstream, including
 [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway). It is
 deliberately not LiteLLM: no UI, database, caching, rate limiting, budgets, or
 multi-provider translation layer. One Go binary, one JSON file, and routes to
-one or more upstream providers.
+one or more upstream providers, plus optional transparent Claude subscription
+proxying at `/claude_sub/`.
 
 ## Features
 
@@ -17,6 +18,8 @@ one or more upstream providers.
   and non-streaming, with transparent response passthrough.
 - `GET /backend-api/wham/usage` for Codex subscription usage, forwarded through
   the configured `codex` provider and returned unchanged.
+- `/claude_sub/*` transparent Anthropic Messages API proxy for Claude Code
+  subscription logins, with usage and API-equivalent cost logging.
 - `GET /v1/models` backed by a strict alias registry, optionally merged with
   models discovered from providers that allow passthrough.
 - OpenRouter-compatible by default: OpenRouter-shaped model listings, usage
@@ -115,6 +118,12 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
   "auth": {
     "enabled": true, // When enabled, at least one virtual key must resolve.
   },
+
+  // Expose /claude_sub/ for Claude Code subscription logins. The client sends
+  // its own OAuth token, which is forwarded to https://api.anthropic.com. No
+  // provider, model, or Claude credential is configured here. When true, an
+  // empty "models" block is allowed.
+  "enable_claude_subscription": false,
 
   // Optional list-price estimates from models.dev. The catalog is cached on
   // disk and refreshed in the background. Omit this block to disable estimates.
@@ -267,7 +276,8 @@ Rules:
   unique, and every key `policy` reference must exist.
 - Unknown configuration fields, duplicate virtual key names, duplicate resolved key
   values, missing environment variables, invalid URLs, and zero models fail
-  startup.
+  startup. Zero models are allowed when `enable_claude_subscription` is true,
+  because `/claude_sub/` forwards model ids without an alias registry.
 - `server.listen` and `read_header_timeout` changes require a restart; other
   values can be reloaded with `SIGHUP`.
 - For `codex` providers, `auth_dir` defaults to `$CODEX_HOME` or `~/.codex`.
@@ -280,6 +290,9 @@ Rules:
 - `pricing_provider` selects the models.dev provider namespace. It defaults to
   `openai` for `codex` providers and is otherwise unset.
 - A model may set an explicit `pricing` block to override the catalog.
+- `enable_claude_subscription` is a single boolean; there is no Claude provider
+  to configure. It always uses `https://api.anthropic.com`, subscription
+  billing, and the `anthropic` pricing namespace.
 
 ### Providers
 
@@ -296,6 +309,10 @@ used. Supported types are:
 - `codex` (alias `chatgpt`): Responses API transport authenticated with OpenAI
   Codex CLI OAuth credentials. Chat Completions requests are bridged to the
   Responses API. See [Codex auth](#codex-auth).
+
+The Claude subscription proxy is not a provider type. Enable it with the
+top-level `enable_claude_subscription` flag; see
+[Claude subscription proxy](#claude-subscription-proxy).
 
 Private AI Gateway is not a separate implementation. Configure it as an
 `openai-compatible` provider. The Phala-hosted deployment is available at
@@ -390,6 +407,69 @@ curl http://127.0.0.1:8080/backend-api/wham/usage?provider=codex \
 The upstream usage URL is derived from the provider's `base_url`; for a typical
 `https://chatgpt.com/backend-api/codex` base URL, the upstream endpoint is
 `https://chatgpt.com/backend-api/wham/usage`.
+
+### Claude subscription proxy
+
+`/claude_sub/` lets Claude Code use a Claude Pro, Max, Team, or Enterprise
+subscription through model-proxy. Claude Code signs in locally and sends its own
+OAuth token in `Authorization`; the proxy forwards that token, the request, and
+the response unchanged. The proxy never stores or refreshes a Claude
+credential.
+
+Enable it with one flag:
+
+```jsonc
+"enable_claude_subscription": true
+```
+
+The path always uses `https://api.anthropic.com`, subscription billing, and the
+`anthropic` models.dev pricing namespace. There is no Claude provider entry, no
+Claude credential in the config, and the `models` block may be omitted because
+this path does not use aliases.
+
+Claude Code requests can be large; raise `server.max_body_bytes` if a session
+exceeds the default 1 MiB.
+
+Point Claude Code at the proxy and give it a virtual key in a custom header:
+
+```sh
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL
+export ANTHROPIC_BASE_URL="http://127.0.0.1:8080/claude_sub"
+export ANTHROPIC_CUSTOM_HEADERS="x-model-proxy-key: Bearer $PROXY_KEY"
+claude
+```
+
+If you previously used API-key authentication, remove `apiKeyHelper` and any
+`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` entries from your Claude Code
+settings, then choose **Claude account with subscription** and sign in.
+
+Path rules:
+
+- The `/claude_sub` prefix is stripped before forwarding. Method, path, query,
+  body, `Authorization`, `x-api-key`, `anthropic-version`, `anthropic-beta`,
+  `user-agent`, and other end-to-end headers pass through. `x-model-proxy-key`
+  is consumed by the proxy and never sent upstream.
+- When `auth.enabled` is true, the proxy key must come from
+  `x-model-proxy-key` (a bare token or `Bearer <token>`). The standard
+  `Authorization` header is reserved for the upstream Claude credential and is
+  never treated as a proxy key on this path.
+- The path is disabled and returns `404` unless `enable_claude_subscription` is
+  true.
+- A virtual key's policy still applies to the requested model id. A `whitelist`
+  key can use only the configured aliases it lists; a `blacklist` key can use
+  anything it does not list.
+- Response bodies and SSE streams are byte-for-byte transparent. Upstream errors
+  are passed through unchanged. Proxy-generated errors use Anthropic's
+  `{"type":"error","error":{...}}` envelope.
+- Usage is observed only for the access log. Anthropic's `input_tokens`,
+  `cache_creation_input_tokens`, and `cache_read_input_tokens` are summed into
+  `prompt_tokens`; `output_tokens` becomes `completion_tokens`; the cache
+  counters are logged separately. Streaming usage is merged from the
+  `message_start` and `message_delta` events.
+- With a pricing catalog, the log includes `estimated_api_cost_usd` and
+  `pricing_source` at Anthropic's API list prices. No cost fields are injected
+  into the response, because a subscription has no per-token charge. The
+  catalog is looked up by the requested model id, then by its undated alias.
 
 ### Model aliases
 
@@ -500,6 +580,8 @@ These are request-body fields, not HTTP headers. OpenRouter reads
 - Success bodies and SSE streams are forwarded byte-for-byte, except for the
   chat-completions usage normalization described below and the Codex Chat
   Completions bridge, which translates between the two dialects.
+- `/claude_sub/` forwards Anthropic request and response bodies, headers, and
+  errors unchanged. Only the access log is enriched with observed usage.
 - Responses API bodies and streams are never normalized. Chat streaming
   requests to non-OpenRouter providers set `stream_options.include_usage` as
   described below.
@@ -726,6 +808,9 @@ all.
 `billing_mode` is configured per provider. It defaults to `subscription` for
 `codex` providers and is omitted otherwise. It tells a log consumer that token
 usage did not incur per-token dollar cost, so a missing `cost_usd` is expected.
+Requests through `/claude_sub/` are always logged with `provider: claude_sub`,
+`billing_mode: subscription`, `passthrough` true, and the requested model id in
+`upstream_model`.
 
 When the upstream does not report `usage.cost` and pricing is available, the log
 also includes `estimated_api_cost_usd` and `pricing_source`. This is a

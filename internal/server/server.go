@@ -18,6 +18,20 @@ type state struct {
 	providers map[string]provider.Provider
 	pricing   CostEstimator
 	logger    *slog.Logger
+	claudeSub provider.TransparentProxy
+}
+
+// Option customizes a Server. It is used to inject the Claude subscription
+// transport in tests; production servers build the default transport from
+// config.
+type Option func(*state)
+
+// WithClaudeSubscriptionTransport overrides the transport that serves
+// /claude_sub/.
+func WithClaudeSubscriptionTransport(transport provider.TransparentProxy) Option {
+	return func(st *state) {
+		st.claudeSub = transport
+	}
 }
 
 type stateKey struct{}
@@ -76,6 +90,7 @@ type Server struct {
 	startedAt  time.Time
 	reloadMu   sync.Mutex
 	models     modelsCache
+	options    []Option
 }
 
 // passthroughModels returns the upstream model ids a passthrough provider
@@ -105,7 +120,7 @@ func (s *Server) passthroughModels(ctx context.Context, st *state, providerName 
 	return ids
 }
 
-func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator) *Server {
+func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator, options ...Option) *Server {
 	if providers == nil {
 		providers = map[string]provider.Provider{}
 	}
@@ -113,8 +128,8 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 		logger = slog.Default()
 	}
 
-	s := &Server{startedAt: time.Now()}
-	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
+	s := &Server{startedAt: time.Now(), options: options}
+	s.state.Store(newState(cfg, providers, logger, pricingSvc, options))
 
 	s.mux = http.NewServeMux()
 	// OpenRouter clients often carry the https://openrouter.ai/api/v1 base URL,
@@ -127,6 +142,10 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 	// Codex clients and usage extensions expect ChatGPT's usage path. The
 	// handler forwards it to the configured Codex provider.
 	s.mux.HandleFunc("/backend-api/wham/usage", s.handleUsage)
+	// Claude Code points ANTHROPIC_BASE_URL at /claude_sub/ and sends its own
+	// subscription OAuth token in Authorization.
+	s.mux.HandleFunc("/claude_sub", s.handleClaudeSub)
+	s.mux.HandleFunc("/claude_sub/", s.handleClaudeSub)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/", s.handleNotFound)
 
@@ -144,7 +163,7 @@ func applyCORSHeaders(header http.Header) {
 	header.Set("Access-Control-Allow-Origin", "*")
 	header.Set("Access-Control-Expose-Headers", "X-Request-ID, X-Model-Proxy-Alias, X-Model-Proxy-Upstream")
 	header.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID, HTTP-Referer, X-Title")
+	header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, X-Request-ID, HTTP-Referer, X-Title, X-Model-Proxy-Key, Anthropic-Version, Anthropic-Beta, X-Api-Key")
 	header.Set("Access-Control-Max-Age", "600")
 }
 
@@ -185,8 +204,22 @@ func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provid
 		logger = old.logger
 	}
 	s.models.clear()
-	s.state.Store(&state{cfg: cfg, providers: providers, pricing: pricingSvc, logger: logger})
+	s.state.Store(newState(cfg, providers, logger, pricingSvc, s.options))
 	return nil
+}
+
+func newState(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator, options []Option) *state {
+	st := &state{
+		cfg:       cfg,
+		providers: providers,
+		pricing:   pricingSvc,
+		logger:    logger,
+		claudeSub: defaultClaudeSubscription(cfg),
+	}
+	for _, option := range options {
+		option(st)
+	}
+	return st
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

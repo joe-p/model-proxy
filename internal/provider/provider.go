@@ -16,6 +16,17 @@ type Request struct {
 	Query         string
 }
 
+// ProxyRequest is a request forwarded to an upstream API without translation.
+// The caller supplies the already-sanitized headers, including the upstream
+// credential, because subscription credentials belong to the client.
+type ProxyRequest struct {
+	Method string
+	Path   string
+	Query  string
+	Header http.Header
+	Body   []byte
+}
+
 // Provider is the boundary between the proxy and an upstream API.
 // Implementations live under internal/provider.
 type Provider interface {
@@ -35,6 +46,13 @@ type ModelLister interface {
 // information. The server uses it for the Codex usage passthrough endpoint.
 type UsageProvider interface {
 	Usage(ctx context.Context) (*http.Response, error)
+}
+
+// TransparentProxy is implemented by providers that forward client requests
+// unchanged, such as the Claude subscription path. Unlike Provider, it does not
+// interpret the request body or inject a credential.
+type TransparentProxy interface {
+	Proxy(ctx context.Context, req ProxyRequest) (*http.Response, error)
 }
 
 type ErrorKind int

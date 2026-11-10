@@ -21,6 +21,10 @@ type Config struct {
 	Policies  map[string]PolicyConfig
 	Providers map[string]ProviderConfig
 	Models    map[string]ModelConfig
+
+	// EnableClaudeSubscription exposes /claude_sub/, a transparent proxy for
+	// Claude Code subscription traffic.
+	EnableClaudeSubscription bool
 }
 
 type ServerConfig struct {

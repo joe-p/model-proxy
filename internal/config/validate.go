@@ -14,10 +14,11 @@ import (
 
 func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string) (*Config, error) {
 	cfg := &Config{
-		EnvFile:   envPath,
-		Policies:  make(map[string]PolicyConfig, len(raw.Policies)),
-		Providers: make(map[string]ProviderConfig, len(raw.Providers)),
-		Models:    make(map[string]ModelConfig, len(raw.Models)),
+		EnvFile:                  envPath,
+		Policies:                 make(map[string]PolicyConfig, len(raw.Policies)),
+		Providers:                make(map[string]ProviderConfig, len(raw.Providers)),
+		Models:                   make(map[string]ModelConfig, len(raw.Models)),
+		EnableClaudeSubscription: raw.EnableClaudeSubscription,
 	}
 
 	// Server defaults.
@@ -272,7 +273,7 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			Pricing:   modelPricing,
 		}
 	}
-	if len(cfg.Models) == 0 {
+	if len(cfg.Models) == 0 && !cfg.EnableClaudeSubscription {
 		return nil, fmt.Errorf("at least one model must be configured")
 	}
 

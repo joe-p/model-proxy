@@ -12,15 +12,16 @@ import (
 )
 
 type rawConfig struct {
-	EnvFile     string                 `json:"env_file"`
-	Server      rawServer              `json:"server"`
-	Logging     rawLogging             `json:"logging"`
-	Auth        *rawAuth               `json:"auth"`
-	Pricing     *rawPricing            `json:"pricing"`
-	VirtualKeys []rawVirtualKey        `json:"virtual_keys"`
-	Policies    []rawPolicy            `json:"policies"`
-	Providers   map[string]rawProvider `json:"providers"`
-	Models      map[string]rawModel    `json:"models"`
+	EnvFile                  string                 `json:"env_file"`
+	Server                   rawServer              `json:"server"`
+	Logging                  rawLogging             `json:"logging"`
+	Auth                     *rawAuth               `json:"auth"`
+	Pricing                  *rawPricing            `json:"pricing"`
+	VirtualKeys              []rawVirtualKey        `json:"virtual_keys"`
+	Policies                 []rawPolicy            `json:"policies"`
+	Providers                map[string]rawProvider `json:"providers"`
+	Models                   map[string]rawModel    `json:"models"`
+	EnableClaudeSubscription bool                   `json:"enable_claude_subscription"`
 }
 
 type rawServer struct {
