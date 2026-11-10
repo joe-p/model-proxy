@@ -431,32 +431,60 @@
           <strong id="tokens">—</strong>
           <span class="hint" id="tokenNote"></span>
         </div>
-        <div class="card">
-          <span class="label">Avg latency</span>
-          <strong id="latency">—</strong>
-          <span class="hint" id="latencyNote"></span>
-        </div>
       </section>
 
-      <section class="panel chart-panel">
+      <section class="panel chart-panel" data-chart="model">
         <div class="chart-head">
-          <h2 id="chartTitle">Cost by model over time</h2>
-          <span class="sub" id="chartNote"></span>
+          <h2 class="chart-title">Cost by model over time</h2>
+          <span class="sub chart-note"></span>
         </div>
-        <div class="chart-shell" id="chartShell">
-          <div class="chart-yaxis" id="chartYAxis"></div>
+        <div class="chart-shell">
+          <div class="chart-yaxis"></div>
           <div class="chart-scroll">
-            <div class="chart-plot" id="chartPlot">
-              <div class="chart-grid" id="chartGrid"></div>
-              <div class="chart-buckets" id="chartBuckets"></div>
+            <div class="chart-plot">
+              <div class="chart-grid"></div>
+              <div class="chart-buckets"></div>
             </div>
           </div>
         </div>
-        <p class="empty" id="chartEmpty" hidden>
-          No cost recorded in this range yet. Try the token metric or turn on
-          subscription estimates.
-        </p>
-        <div class="legend" id="legend"></div>
+        <p class="empty chart-empty" hidden></p>
+        <div class="legend"></div>
+      </section>
+
+      <section class="panel chart-panel" data-chart="provider">
+        <div class="chart-head">
+          <h2 class="chart-title">Cost by provider over time</h2>
+          <span class="sub chart-note"></span>
+        </div>
+        <div class="chart-shell">
+          <div class="chart-yaxis"></div>
+          <div class="chart-scroll">
+            <div class="chart-plot">
+              <div class="chart-grid"></div>
+              <div class="chart-buckets"></div>
+            </div>
+          </div>
+        </div>
+        <p class="empty chart-empty" hidden></p>
+        <div class="legend"></div>
+      </section>
+
+      <section class="panel chart-panel" data-chart="userAgent">
+        <div class="chart-head">
+          <h2 class="chart-title">Cost by user-agent over time</h2>
+          <span class="sub chart-note"></span>
+        </div>
+        <div class="chart-shell">
+          <div class="chart-yaxis"></div>
+          <div class="chart-scroll">
+            <div class="chart-plot">
+              <div class="chart-grid"></div>
+              <div class="chart-buckets"></div>
+            </div>
+          </div>
+        </div>
+        <p class="empty chart-empty" hidden></p>
+        <div class="legend"></div>
       </section>
 
       <section class="panel">
@@ -492,7 +520,7 @@
         metric: 'cost',
         includeSub: false,
         colors: new Map(),
-        nextColor: 0,
+        colorCounts: { model: 0, provider: 0, userAgent: 0 },
       };
 
       const SERIES_COLORS = [
@@ -510,6 +538,11 @@
         '#65a30d',
       ];
       const BUCKET_LABELS = { day: 'Daily', week: 'Weekly', month: 'Monthly' };
+      const CHART_CONFIG = {
+        model: { title: 'model', note: 'model' },
+        provider: { title: 'provider', note: 'provider' },
+        userAgent: { title: 'user-agent', note: 'user-agent product (before /)' },
+      };
 
       const $ = (id) => document.getElementById(id);
       const usd = (value) => {
@@ -542,14 +575,13 @@
         });
       };
 
-      const modelKey = (model, provider) => `${model}\u0000${provider}`;
-
-      function colorFor(model, provider) {
-        const key = modelKey(model, provider);
+      function colorFor(scope, label, detail) {
+        const key = `${scope}\u0000${label}\u0000${detail}`;
         let color = state.colors.get(key);
         if (!color) {
-          color = SERIES_COLORS[state.nextColor % SERIES_COLORS.length];
-          state.nextColor += 1;
+          const index = state.colorCounts[scope] ?? 0;
+          color = SERIES_COLORS[index % SERIES_COLORS.length];
+          state.colorCounts[scope] = index + 1;
           state.colors.set(key, color);
         }
         return color;
@@ -660,21 +692,21 @@
         title.textContent = details.title;
         tooltip.append(title);
 
-        const model = document.createElement('div');
-        model.className = 'tip-model';
+        const group = document.createElement('div');
+        group.className = 'tip-model';
         const swatch = document.createElement('span');
         swatch.className = 'swatch';
         swatch.style.background = details.color;
         const name = document.createElement('span');
-        name.textContent = details.model;
-        model.append(swatch, name);
-        if (details.provider) {
-          const provider = document.createElement('span');
-          provider.className = 'sub';
-          provider.textContent = details.provider;
-          model.append(provider);
+        name.textContent = details.label;
+        group.append(swatch, name);
+        if (details.detail) {
+          const detail = document.createElement('span');
+          detail.className = 'sub';
+          detail.textContent = details.detail;
+          group.append(detail);
         }
-        tooltip.append(model);
+        tooltip.append(group);
 
         const value = document.createElement('div');
         value.className = 'tip-value';
@@ -726,13 +758,13 @@
           const nameCell = document.createElement('td');
           const name = document.createElement('div');
           name.className = 'model';
-          name.textContent = model.model;
+          name.textContent = model.label;
           nameCell.append(name);
-          if (model.provider) {
-            const provider = document.createElement('div');
-            provider.className = 'sub';
-            provider.textContent = model.provider;
-            nameCell.append(provider);
+          if (model.detail) {
+            const detail = document.createElement('div');
+            detail.className = 'sub';
+            detail.textContent = model.detail;
+            nameCell.append(detail);
           }
           tr.append(nameCell);
 
@@ -771,9 +803,10 @@
         }
       }
 
-      function renderChart(data) {
+      function renderChart(panel, chart, scope, bucket, metric) {
+        if (!panel) return;
         hideChartTooltip();
-        const metric = data.metric === 'tokens' ? 'tokens' : 'cost';
+        const config = CHART_CONFIG[scope] ?? CHART_CONFIG.model;
         const valueOf = (row) =>
           metric === 'tokens'
             ? (Number(row.promptTokens) || 0) + (Number(row.completionTokens) || 0)
@@ -783,36 +816,47 @@
         const describeValue = (value) =>
           metric === 'tokens' ? `${compact(value)} tokens` : formatValue(value);
 
-        const buckets = data.timeseries ?? [];
-        const totals = buckets.map((bucket) =>
-          bucket.segments.reduce((sum, segment) => sum + valueOf(segment), 0),
+        const buckets = chart.timeseries ?? [];
+        const groups = chart.groups ?? [];
+        const totals = buckets.map((entry) =>
+          entry.segments.reduce((sum, segment) => sum + valueOf(segment), 0),
         );
         const maxTotal = totals.reduce((max, value) => Math.max(max, value), 0);
         const hasUsage = maxTotal > 0;
 
-        $('chartTitle').textContent =
-          metric === 'tokens' ? 'Tokens by model over time' : 'Cost by model over time';
-        $('chartNote').textContent = `${BUCKET_LABELS[data.bucket] ?? data.bucket} ${
+        const title = panel.querySelector('.chart-title');
+        const note = panel.querySelector('.chart-note');
+        const empty = panel.querySelector('.chart-empty');
+        const shell = panel.querySelector('.chart-shell');
+        const yAxis = panel.querySelector('.chart-yaxis');
+        const grid = panel.querySelector('.chart-grid');
+        const plot = panel.querySelector('.chart-plot');
+        const bars = panel.querySelector('.chart-buckets');
+        const legend = panel.querySelector('.legend');
+
+        title.textContent = `${metric === 'tokens' ? 'Tokens' : 'Cost'} by ${
+          config.title
+        } over time`;
+        note.textContent = `${BUCKET_LABELS[bucket] ?? bucket} ${
           metric === 'tokens' ? 'token' : 'cost'
-        } totals by model · UTC`;
-        $('chartEmpty').textContent =
+        } totals by ${config.note} · UTC`;
+        empty.textContent =
           metric === 'tokens'
-            ? 'No token usage recorded in this range yet.'
-            : 'No cost recorded in this range yet. Try the token metric or turn on subscription estimates.';
-        $('chartShell').hidden = !hasUsage;
-        $('chartEmpty').hidden = hasUsage;
-        $('legend').hidden = !hasUsage;
+            ? `No token usage recorded for ${config.note} in this range yet.`
+            : `No cost recorded for ${config.note} in this range yet. Try the token metric or turn on subscription estimates.`;
+        shell.hidden = !hasUsage;
+        empty.hidden = hasUsage;
+        legend.hidden = !hasUsage;
         if (!hasUsage) {
-          $('chartYAxis').textContent = '';
-          $('chartGrid').textContent = '';
-          $('chartBuckets').textContent = '';
-          $('legend').textContent = '';
+          yAxis.textContent = '';
+          grid.textContent = '';
+          bars.textContent = '';
+          legend.textContent = '';
           return;
         }
 
         const { max, ticks } = niceScale(maxTotal, metric === 'tokens' ? 1 : 0);
 
-        const yAxis = $('chartYAxis');
         yAxis.textContent = '';
         for (const tick of ticks) {
           const label = document.createElement('span');
@@ -821,7 +865,6 @@
           yAxis.append(label);
         }
 
-        const grid = $('chartGrid');
         grid.textContent = '';
         for (const tick of ticks) {
           const line = document.createElement('div');
@@ -832,17 +875,14 @@
 
         const barMin =
           buckets.length > 180 ? 6 : buckets.length > 60 ? 10 : buckets.length > 30 ? 14 : 20;
-        const plot = $('chartPlot');
         plot.style.setProperty('--bar-min', `${barMin}px`);
         plot.style.minWidth = `${Math.max(320, buckets.length * (barMin + 4))}px`;
 
-        const bars = $('chartBuckets');
         bars.textContent = '';
         const labelStep = Math.max(1, Math.ceil(buckets.length / 12));
 
         for (let index = 0; index < buckets.length; index += 1) {
-          const bucket = buckets[index];
-          const total = totals[index];
+          const entry = buckets[index];
           const column = document.createElement('div');
           column.className = 'chart-bucket';
 
@@ -851,22 +891,22 @@
           const stack = document.createElement('div');
           stack.className = 'chart-stack';
 
-          for (const segment of bucket.segments) {
+          for (const segment of entry.segments) {
             const value = valueOf(segment);
             if (!(value > 0)) continue;
             const part = document.createElement('div');
             part.className = 'chart-seg';
             part.style.height = `${(value / max) * 100}%`;
-            const color = colorFor(segment.model, segment.provider);
+            const color = colorFor(scope, segment.label, segment.detail);
             part.style.background = color;
 
             const tokens =
               (Number(segment.promptTokens) || 0) +
               (Number(segment.completionTokens) || 0);
             const details = {
-              title: bucketTitle(data.bucket, bucket.start),
-              model: segment.model,
-              provider: segment.provider,
+              title: bucketTitle(bucket, entry.start),
+              label: segment.label,
+              detail: segment.detail,
               color,
               value: describeValue(value),
               meta: `${count(segment.requests)} requests${
@@ -881,8 +921,8 @@
             };
             part.setAttribute(
               'aria-label',
-              `${details.title} · ${details.model}${
-                details.provider ? ` (${details.provider})` : ''
+              `${details.title} · ${details.label}${
+                details.detail ? ` (${details.detail})` : ''
               } · ${details.value} · ${details.meta}`,
             );
             part.addEventListener('pointerenter', (event) =>
@@ -899,44 +939,64 @@
           const tick = document.createElement('span');
           tick.className = 'chart-tick';
           if (index % labelStep === 0 || index === buckets.length - 1) {
-            tick.textContent = bucketLabel(data.bucket, bucket.start);
-            tick.title = bucketTitle(data.bucket, bucket.start);
+            tick.textContent = bucketLabel(bucket, entry.start);
+            tick.title = bucketTitle(bucket, entry.start);
           }
           column.append(tick);
           bars.append(column);
         }
 
-        const legend = $('legend');
         legend.textContent = '';
-        const legendModels = [...data.models]
-          .filter((model) => valueOf(model) > 0)
+        const legendGroups = [...groups]
+          .filter((group) => valueOf(group) > 0)
           .sort((a, b) => valueOf(b) - valueOf(a));
-        for (const model of legendModels) {
+        for (const group of legendGroups) {
           const item = document.createElement('span');
           item.className = 'legend-item';
 
           const swatch = document.createElement('span');
           swatch.className = 'swatch';
-          swatch.style.background = colorFor(model.model, model.provider);
+          swatch.style.background = colorFor(scope, group.label, group.detail);
           item.append(swatch);
 
           const name = document.createElement('span');
-          name.textContent = model.model;
+          name.textContent = group.label;
           item.append(name);
 
-          if (model.provider) {
-            const provider = document.createElement('span');
-            provider.className = 'sub';
-            provider.textContent = model.provider;
-            item.append(provider);
+          if (group.detail) {
+            const detail = document.createElement('span');
+            detail.className = 'sub';
+            detail.textContent = group.detail;
+            item.append(detail);
           }
 
           const total = document.createElement('span');
           total.className = 'legend-total';
-          total.textContent = describeValue(valueOf(model));
+          total.textContent = describeValue(valueOf(group));
           item.append(total);
 
           legend.append(item);
+        }
+      }
+
+      function renderCharts(data) {
+        const metric = data.metric === 'tokens' ? 'tokens' : 'cost';
+        const charts = [
+          [
+            'model',
+            { groups: data.models ?? [], timeseries: data.timeseries ?? [] },
+          ],
+          ['provider', data.providers ?? { groups: [], timeseries: [] }],
+          ['userAgent', data.userAgents ?? { groups: [], timeseries: [] }],
+        ];
+        for (const [scope, chart] of charts) {
+          renderChart(
+            document.querySelector(`[data-chart="${scope}"]`),
+            chart,
+            scope,
+            data.bucket,
+            metric,
+          );
         }
       }
 
@@ -960,9 +1020,7 @@
         $('tokenNote').textContent = `${compact(s.promptTokens)} prompt · ${compact(
           s.completionTokens,
         )} completion`;
-        $('latency').textContent = `${Math.round(s.avgDurationMs)} ms`;
-        $('latencyNote').textContent = `${count(s.streamed)} streamed`;
-        renderChart(data);
+        renderCharts(data);
         renderModels(data.models);
         $('updated').textContent = `Updated ${new Date().toLocaleTimeString()} · range starts ${new Date(
           data.range.from,

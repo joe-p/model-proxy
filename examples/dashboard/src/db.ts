@@ -19,9 +19,11 @@ export interface Summary {
   avgDurationMs: number;
 }
 
-export interface ModelRow {
-  model: string;
-  provider: string;
+export type Breakdown = 'model' | 'provider' | 'userAgent';
+
+export interface GroupRow {
+  label: string;
+  detail: string;
   requests: number;
   errors: number;
   promptTokens: number;
@@ -31,7 +33,7 @@ export interface ModelRow {
   apiEstimateUsd: number;
 }
 
-export interface TimeseriesRow extends ModelRow {
+export interface GroupTimeseriesRow extends GroupRow {
   bucketStartMs: number;
 }
 
@@ -102,10 +104,7 @@ FROM usage
 WHERE ts_ms >= ? AND ts_ms < ?
 `;
 
-const MODELS = `
-SELECT
-  COALESCE(alias, upstream_model, 'unknown') AS model,
-  COALESCE(provider, '') AS provider,
+const AGGREGATES = `
   COUNT(*) AS requests,
   COALESCE(SUM(CASE WHEN status >= 400 OR error_code IS NOT NULL THEN 1 ELSE 0 END), 0) AS errors,
   COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
@@ -115,31 +114,59 @@ SELECT
                     THEN estimated_api_cost_usd ELSE 0 END), 0) AS subscription_estimate_usd,
   COALESCE(SUM(CASE WHEN cost_usd IS NULL AND COALESCE(billing_mode, '') <> 'subscription'
                     THEN estimated_api_cost_usd ELSE 0 END), 0) AS api_estimate_usd
-FROM usage
-WHERE ts_ms >= ? AND ts_ms < ?
-GROUP BY model, provider
 `;
 
-function timeseriesSql(bucket: Bucket): string {
+interface Dimension {
+  label: string;
+  detail: string;
+}
+
+const DIMENSIONS: Record<Breakdown, Dimension> = {
+  model: {
+    label: "COALESCE(alias, upstream_model, 'unknown')",
+    detail: "COALESCE(provider, '')",
+  },
+  provider: {
+    label: "COALESCE(NULLIF(provider, ''), 'unknown')",
+    detail: "''",
+  },
+  userAgent: {
+    // Group by the product token before the first '/', ignoring its version.
+    label: `COALESCE(NULLIF(TRIM(CASE
+      WHEN user_agent IS NULL OR TRIM(user_agent) = '' THEN 'unknown'
+      WHEN INSTR(user_agent, '/') > 0 THEN SUBSTR(user_agent, 1, INSTR(user_agent, '/') - 1)
+      ELSE user_agent
+    END), ''), 'unknown')`,
+    detail: "''",
+  },
+};
+
+function groupsSql(breakdown: Breakdown): string {
+  const { label, detail } = DIMENSIONS[breakdown];
+  return `
+SELECT
+  ${label} AS label,
+  ${detail} AS detail,
+  ${AGGREGATES}
+FROM usage
+WHERE ts_ms >= ? AND ts_ms < ?
+GROUP BY label, detail
+`;
+}
+
+function timeseriesSql(bucket: Bucket, breakdown: Breakdown): string {
   const bucketKey = bucketSqlExpression(bucket);
+  const { label, detail } = DIMENSIONS[breakdown];
   return `
 SELECT
   ${bucketKey} AS bucket_key,
-  COALESCE(alias, upstream_model, 'unknown') AS model,
-  COALESCE(provider, '') AS provider,
-  COUNT(*) AS requests,
-  COALESCE(SUM(CASE WHEN status >= 400 OR error_code IS NOT NULL THEN 1 ELSE 0 END), 0) AS errors,
-  COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-  COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-  COALESCE(SUM(cost_usd), 0) AS reported_cost_usd,
-  COALESCE(SUM(CASE WHEN cost_usd IS NULL AND billing_mode = 'subscription'
-                    THEN estimated_api_cost_usd ELSE 0 END), 0) AS subscription_estimate_usd,
-  COALESCE(SUM(CASE WHEN cost_usd IS NULL AND COALESCE(billing_mode, '') <> 'subscription'
-                    THEN estimated_api_cost_usd ELSE 0 END), 0) AS api_estimate_usd
+  ${label} AS label,
+  ${detail} AS detail,
+  ${AGGREGATES}
 FROM usage
 WHERE ts_ms >= ? AND ts_ms < ?
-GROUP BY bucket_key, model, provider
-ORDER BY bucket_key, model, provider
+GROUP BY bucket_key, label, detail
+ORDER BY bucket_key, label, detail
 `;
 }
 
@@ -157,8 +184,11 @@ export class UsageStore {
   private readonly db: DatabaseSync;
   private readonly insertStmt: ReturnType<DatabaseSync['prepare']>;
   private readonly summaryStmt: ReturnType<DatabaseSync['prepare']>;
-  private readonly modelsStmt: ReturnType<DatabaseSync['prepare']>;
-  private readonly timeseriesStmts: Record<Bucket, ReturnType<DatabaseSync['prepare']>>;
+  private readonly groupStmts: Record<Breakdown, ReturnType<DatabaseSync['prepare']>>;
+  private readonly timeseriesStmts: Record<
+    Breakdown,
+    Record<Bucket, ReturnType<DatabaseSync['prepare']>>
+  >;
 
   constructor(path: string) {
     this.db = new DatabaseSync(path);
@@ -168,11 +198,27 @@ export class UsageStore {
     this.db.exec(SCHEMA);
     this.insertStmt = this.db.prepare(INSERT);
     this.summaryStmt = this.db.prepare(SUMMARY);
-    this.modelsStmt = this.db.prepare(MODELS);
+    this.groupStmts = {
+      model: this.db.prepare(groupsSql('model')),
+      provider: this.db.prepare(groupsSql('provider')),
+      userAgent: this.db.prepare(groupsSql('userAgent')),
+    };
     this.timeseriesStmts = {
-      day: this.db.prepare(timeseriesSql('day')),
-      week: this.db.prepare(timeseriesSql('week')),
-      month: this.db.prepare(timeseriesSql('month')),
+      model: {
+        day: this.db.prepare(timeseriesSql('day', 'model')),
+        week: this.db.prepare(timeseriesSql('week', 'model')),
+        month: this.db.prepare(timeseriesSql('month', 'model')),
+      },
+      provider: {
+        day: this.db.prepare(timeseriesSql('day', 'provider')),
+        week: this.db.prepare(timeseriesSql('week', 'provider')),
+        month: this.db.prepare(timeseriesSql('month', 'provider')),
+      },
+      userAgent: {
+        day: this.db.prepare(timeseriesSql('day', 'userAgent')),
+        week: this.db.prepare(timeseriesSql('week', 'userAgent')),
+        month: this.db.prepare(timeseriesSql('month', 'userAgent')),
+      },
     };
   }
 
@@ -231,11 +277,11 @@ export class UsageStore {
     };
   }
 
-  models(fromMs: number, toMs: number): ModelRow[] {
-    const rows = this.modelsStmt.all(fromMs, toMs) as unknown as Row[];
+  groups(fromMs: number, toMs: number, breakdown: Breakdown): GroupRow[] {
+    const rows = this.groupStmts[breakdown].all(fromMs, toMs) as unknown as Row[];
     return rows.map((row) => ({
-      model: s(row.model) || 'unknown',
-      provider: s(row.provider),
+      label: s(row.label) || 'unknown',
+      detail: s(row.detail),
       requests: n(row.requests),
       errors: n(row.errors),
       promptTokens: n(row.prompt_tokens),
@@ -246,16 +292,21 @@ export class UsageStore {
     }));
   }
 
-  timeseries(fromMs: number, toMs: number, bucket: Bucket): TimeseriesRow[] {
-    const rows = this.timeseriesStmts[bucket].all(fromMs, toMs) as unknown as Row[];
-    const result: TimeseriesRow[] = [];
+  timeseries(
+    fromMs: number,
+    toMs: number,
+    bucket: Bucket,
+    breakdown: Breakdown,
+  ): GroupTimeseriesRow[] {
+    const rows = this.timeseriesStmts[breakdown][bucket].all(fromMs, toMs) as unknown as Row[];
+    const result: GroupTimeseriesRow[] = [];
     for (const row of rows) {
       const bucketStartMs = bucketStartFromKey(bucket, String(row.bucket_key ?? ''));
       if (!Number.isFinite(bucketStartMs)) continue;
       result.push({
         bucketStartMs,
-        model: s(row.model) || 'unknown',
-        provider: s(row.provider),
+        label: s(row.label) || 'unknown',
+        detail: s(row.detail),
         requests: n(row.requests),
         errors: n(row.errors),
         promptTokens: n(row.prompt_tokens),

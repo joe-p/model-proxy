@@ -3,8 +3,9 @@
 A small TypeScript collector that turns model-proxy's JSON access records into a
 usage dashboard. It accepts records over HTTP from model-proxy's access sink, or
 from stdout/file for offline replay, stores them in SQLite, then serves a page
-with cost totals, a subscription-estimate toggle, a stacked cost-or-token chart
-with day/week/month buckets, and a per-model breakdown.
+with cost totals, a subscription-estimate toggle, stacked cost-or-token charts
+by model, provider, and user-agent product with day/week/month buckets, and a
+per-model breakdown.
 
 It has **no runtime dependencies**. It uses `node:sqlite` (Node 22.13+) and
 `tsx` only to run TypeScript directly.
@@ -96,10 +97,15 @@ It responds with `202` and `{"accepted":n,"skipped":n}`. A malformed body gets
 
 `hours` is the lookback window. `bucket` is `day`, `week`, or `month`; buckets
 are UTC and weeks start on Monday. `metric` is `cost` or `tokens`; it controls
-the chart's stacking order and legend totals. The response includes
-`summary`, `models`, and `timeseries`, where each bucket has `start`, `end`, and
-per-model `segments` with reported, estimated, and total cost plus token counts.
-Empty buckets are included so the chart's time axis is continuous.
+the charts' stacking order and legend totals.
+
+The response includes `summary`, the model table's `models` array, and chart
+data for `timeseries` (model), `providers`, and `userAgents`. The provider and
+user-agent objects each contain `groups` and `timeseries`. Each bucket has
+`start`, `end`, and `segments` with `label`, `detail`, reported/estimated/total
+cost, and token counts. Empty buckets are included so the time axis is
+continuous. User-agent segments are grouped by the product token before the
+first `/`, so `curl/8.5.0` and `curl/8.4.0` share one series.
 
 ## What it computes
 
@@ -114,12 +120,14 @@ Estimated and reported cost are never summed on the same row, so the total
 cannot double-count. The toggle only affects the subscription estimate: that
 usage did not incur a per-token charge, so it is off by default.
 
-The model breakdown and the chart's stacked segments group by `alias` (falling
-back to `upstream_model`) and provider. Token counts are the prompt/completion
-sums from the log. The chart stacks total cost or prompt/completion tokens per
-time bucket, using the same subscription toggle as the cards when the cost
-metric is selected. Hover a segment for its bucket, model/provider, selected
-metric, the other metric, and request/error counts.
+The model chart groups by `alias` (falling back to `upstream_model`) and
+provider, with the provider shown as the segment detail. The provider chart
+groups by `provider`. The user-agent chart groups by the user-agent product
+before the first `/`. Token counts are the prompt/completion sums from the log.
+Each chart stacks total cost or prompt/completion tokens per time bucket, using
+the same subscription toggle as the cards when the cost metric is selected.
+Hover a segment for its bucket, group, selected metric, the other metric, and
+request/error counts.
 
 ## How it works
 

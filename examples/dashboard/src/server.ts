@@ -4,7 +4,13 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import type { ModelRow, Summary, TimeseriesRow, UsageStore } from './db.js';
+import type {
+  Breakdown,
+  GroupRow,
+  GroupTimeseriesRow,
+  Summary,
+  UsageStore,
+} from './db.js';
 import { parseRecord, type AccessLog } from './parse.js';
 import {
   nextBucketStart,
@@ -26,7 +32,12 @@ type Metric = 'cost' | 'tokens';
 interface TimeseriesBucket {
   start: string;
   end: string;
-  segments: WithTotal<ModelRow>[];
+  segments: WithTotal<GroupRow>[];
+}
+
+interface BreakdownData {
+  groups: WithTotal<GroupRow>[];
+  timeseries: TimeseriesBucket[];
 }
 
 const MAX_INGEST_BYTES = 8 * 1024 * 1024;
@@ -50,19 +61,19 @@ function withTotal<T extends Costed>(row: T, includeSubscription: boolean): With
   return { ...row, totalCostUsd };
 }
 
-function modelKey(model: string, provider: string): string {
-  return `${model}\u0000${provider}`;
+function groupKey(label: string, detail: string): string {
+  return `${label}\u0000${detail}`;
 }
 
-function modelMetric(row: WithTotal<ModelRow>, metric: Metric): number {
+function groupMetric(row: WithTotal<GroupRow>, metric: Metric): number {
   return metric === 'tokens' ? row.promptTokens + row.completionTokens : row.totalCostUsd;
 }
 
-function toSegment(row: TimeseriesRow, includeSubscription: boolean): WithTotal<ModelRow> {
+function toSegment(row: GroupTimeseriesRow, includeSubscription: boolean): WithTotal<GroupRow> {
   return withTotal(
     {
-      model: row.model,
-      provider: row.provider,
+      label: row.label,
+      detail: row.detail,
       requests: row.requests,
       errors: row.errors,
       promptTokens: row.promptTokens,
@@ -76,14 +87,14 @@ function toSegment(row: TimeseriesRow, includeSubscription: boolean): WithTotal<
 }
 
 function buildTimeseries(
-  rows: TimeseriesRow[],
+  rows: GroupTimeseriesRow[],
   fromMs: number,
   toMs: number,
   bucket: Bucket,
   includeSubscription: boolean,
-  modelOrder: Map<string, number>,
+  groupOrder: Map<string, number>,
 ): TimeseriesBucket[] {
-  const byStart = new Map<number, TimeseriesRow[]>();
+  const byStart = new Map<number, GroupTimeseriesRow[]>();
   for (const row of rows) {
     const list = byStart.get(row.bucketStartMs);
     if (list) list.push(row);
@@ -100,12 +111,12 @@ function buildTimeseries(
     const segments = (byStart.get(start) ?? [])
       .map((row) => toSegment(row, includeSubscription))
       .sort((a, b) => {
-        const rankA = modelOrder.get(modelKey(a.model, a.provider)) ?? Number.MAX_SAFE_INTEGER;
-        const rankB = modelOrder.get(modelKey(b.model, b.provider)) ?? Number.MAX_SAFE_INTEGER;
+        const rankA = groupOrder.get(groupKey(a.label, a.detail)) ?? Number.MAX_SAFE_INTEGER;
+        const rankB = groupOrder.get(groupKey(b.label, b.detail)) ?? Number.MAX_SAFE_INTEGER;
         return (
           rankA - rankB ||
-          a.model.localeCompare(b.model) ||
-          a.provider.localeCompare(b.provider)
+          a.label.localeCompare(b.label) ||
+          a.detail.localeCompare(b.detail)
         );
       });
 
@@ -116,6 +127,42 @@ function buildTimeseries(
     });
   }
   return buckets;
+}
+
+function buildBreakdown(
+  store: UsageStore,
+  fromMs: number,
+  toMs: number,
+  bucket: Bucket,
+  breakdown: Breakdown,
+  metric: Metric,
+  includeSubscription: boolean,
+): BreakdownData {
+  const groups = store
+    .groups(fromMs, toMs, breakdown)
+    .map((row) => withTotal(row, includeSubscription))
+    .sort(
+      (a, b) =>
+        b.totalCostUsd - a.totalCostUsd ||
+        a.label.localeCompare(b.label) ||
+        a.detail.localeCompare(b.detail),
+    );
+
+  const groupOrder = new Map(
+    [...groups]
+      .sort((a, b) => groupMetric(b, metric) - groupMetric(a, metric))
+      .map((row, index) => [groupKey(row.label, row.detail), index]),
+  );
+  const timeseries = buildTimeseries(
+    store.timeseries(fromMs, toMs, bucket, breakdown),
+    fromMs,
+    toMs,
+    bucket,
+    includeSubscription,
+    groupOrder,
+  );
+
+  return { groups, timeseries };
 }
 
 let cachedHtml: string | undefined;
@@ -158,23 +205,32 @@ function handleUsage(store: UsageStore, res: ServerResponse, url: URL): void {
   const fromMs = toMs - hours * 60 * 60 * 1000;
 
   const summary: WithTotal<Summary> = withTotal(store.summary(fromMs, toMs), includeSubscription);
-  const models: WithTotal<ModelRow>[] = store
-    .models(fromMs, toMs)
-    .map((row) => withTotal(row, includeSubscription))
-    .sort((a, b) => b.totalCostUsd - a.totalCostUsd);
-
-  const modelOrder = new Map(
-    [...models]
-      .sort((a, b) => modelMetric(b, metric) - modelMetric(a, metric))
-      .map((row, index) => [modelKey(row.model, row.provider), index]),
-  );
-  const timeseries = buildTimeseries(
-    store.timeseries(fromMs, toMs, bucket),
+  const modelData = buildBreakdown(
+    store,
     fromMs,
     toMs,
     bucket,
+    'model',
+    metric,
     includeSubscription,
-    modelOrder,
+  );
+  const providerData = buildBreakdown(
+    store,
+    fromMs,
+    toMs,
+    bucket,
+    'provider',
+    metric,
+    includeSubscription,
+  );
+  const userAgentData = buildBreakdown(
+    store,
+    fromMs,
+    toMs,
+    bucket,
+    'userAgent',
+    metric,
+    includeSubscription,
   );
 
   sendJson(res, 200, {
@@ -187,8 +243,10 @@ function handleUsage(store: UsageStore, res: ServerResponse, url: URL): void {
     metric,
     includeSubscription,
     summary,
-    models,
-    timeseries,
+    models: modelData.groups,
+    timeseries: modelData.timeseries,
+    providers: providerData,
+    userAgents: userAgentData,
   });
 }
 
