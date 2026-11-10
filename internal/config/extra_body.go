@@ -18,8 +18,8 @@ var reservedExtraBodyKeys = map[string]struct{}{
 	"plugins":  {},
 }
 
-// normalizeExtraBody converts a TOML-decoded extra_body table into raw JSON
-// values and rejects fields that must remain under proxy/client control.
+// normalizeExtraBody converts a config extra_body object into raw JSON values
+// and rejects fields that must remain under proxy/client control.
 func normalizeExtraBody(value map[string]any, field string) (map[string]json.RawMessage, error) {
 	if len(value) == 0 {
 		return nil, nil

@@ -1,4 +1,4 @@
-/config.toml
+/config.json
 .env
 /bin/
 /model-proxy

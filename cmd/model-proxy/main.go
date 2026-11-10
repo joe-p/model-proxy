@@ -26,7 +26,7 @@ func main() {
 
 func run() error {
 	fs := flag.NewFlagSet("model-proxy", flag.ContinueOnError)
-	configPath := fs.String("config", defaultConfigPath(), "path to TOML configuration")
+	configPath := fs.String("config", defaultConfigPath(), "path to JSON configuration")
 	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
@@ -147,5 +147,5 @@ func defaultConfigPath() string {
 	if path := os.Getenv("MODEL_PROXY_CONFIG"); path != "" {
 		return path
 	}
-	return "./config.toml"
+	return "./config.json"
 }

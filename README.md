@@ -2,7 +2,7 @@
 
 A small, configuration-driven, OpenAI-compatible proxy for OpenRouter. It is
 deliberately not LiteLLM: no UI, database, caching, rate limiting, budgets, or
-multi-provider translation layer. One Go binary, one TOML file, one upstream
+multi-provider translation layer. One Go binary, one JSON file, one upstream
 provider.
 
 ## Features
@@ -10,7 +10,7 @@ provider.
 - `POST /v1/chat/completions`, streaming and non-streaming.
 - `GET /v1/models` backed by a strict alias registry.
 - `GET /healthz` liveness endpoint.
-- TOML configuration with strict unknown-field rejection.
+- JSON configuration with strict unknown-field rejection.
 - Virtual keys loaded from environment variables, with optional `.env` support.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
@@ -23,16 +23,16 @@ provider.
 ## Quick start
 
 ```sh
-cp config.example.toml config.toml
+cp config.example.json config.json
 cp .env.example .env
 chmod 600 .env
-# edit config.toml and .env
+# edit config.json and .env
 
 make build
-./bin/model-proxy -config ./config.toml
+./bin/model-proxy -config ./config.json
 ```
 
-Or with the default `./config.toml`:
+Or with the default `./config.json`:
 
 ```sh
 go run ./cmd/model-proxy
@@ -41,7 +41,7 @@ go run ./cmd/model-proxy
 `MODEL_PROXY_CONFIG` can supply the default config path.
 
 ```sh
-export MODEL_PROXY_CONFIG=/etc/model-proxy/config.toml
+export MODEL_PROXY_CONFIG=/etc/model-proxy/config.json
 ```
 
 ### Example request
@@ -64,54 +64,89 @@ curl http://127.0.0.1:8080/v1/models \
 
 ## Configuration
 
-See [`config.example.toml`](./config.example.toml) for the full schema.
+See [`config.example.json`](./config.example.json) for a complete example. JSON
+does not support comments, so the rules below document the schema. The example
+shows both policy modes, a key without a policy, provider/model `extra_body`,
+and optional OpenRouter attribution headers.
 
-```toml
-env_file = ".env"
-
-[server]
-listen = "127.0.0.1:8080"
-max_body_bytes = 1048576
-read_header_timeout = "10s"
-shutdown_timeout = "15s"
-
-[logging]
-format = "json"          # json | text
-level = "info"           # debug | info | warn | error
-log_usage = true
-
-[auth]
-enabled = true
-
-[[virtual_keys]]
-name = "laptop"
-key_env = "PROXY_KEY_LAPTOP"
-policy = "basic"          # optional
-
-# Optional: restrict which model aliases a key may use.
-[[policies]]
-name = "basic"
-mode = "whitelist"        # whitelist | blacklist
-models = ["fast"]
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_API_KEY"
-dial_timeout = "10s"
-response_header_timeout = "120s"
-# referer = "https://example.com"
-# title = "model-proxy"
-
-# Optional defaults injected into every request body for this provider.
-# [providers.openrouter.extra_body]
-# provider = { zdr = true, data_collection = "deny" }
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-
-# [models.fast.extra_body]
-# provider = { order = ["openai"], allow_fallbacks = false }
+```json
+{
+  "env_file": ".env",
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "max_body_bytes": 1048576,
+    "read_header_timeout": "10s",
+    "shutdown_timeout": "15s"
+  },
+  "logging": {
+    "format": "json",
+    "level": "info",
+    "log_usage": true
+  },
+  "auth": {
+    "enabled": true
+  },
+  "virtual_keys": [
+    {
+      "name": "laptop",
+      "key_env": "PROXY_KEY_LAPTOP",
+      "policy": "basic"
+    },
+    {
+      "name": "ci",
+      "key_env": "PROXY_KEY_CI",
+      "policy": "no-smart"
+    },
+    {
+      "name": "admin",
+      "key_env": "PROXY_KEY_ADMIN"
+    }
+  ],
+  "policies": [
+    {
+      "name": "basic",
+      "mode": "whitelist",
+      "models": ["fast"]
+    },
+    {
+      "name": "no-smart",
+      "mode": "blacklist",
+      "models": ["smart"]
+    }
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "dial_timeout": "10s",
+      "response_header_timeout": "120s",
+      "referer": "https://example.com",
+      "title": "model-proxy",
+      "extra_body": {
+        "provider": {
+          "zdr": true,
+          "data_collection": "deny"
+        }
+      }
+    }
+  },
+  "models": {
+    "fast": {
+      "provider": "openrouter",
+      "upstream": "openai/gpt-4o-mini",
+      "extra_body": {
+        "provider": {
+          "order": ["openai"],
+          "allow_fallbacks": false
+        }
+      }
+    },
+    "smart": {
+      "provider": "openrouter",
+      "upstream": "anthropic/claude-sonnet-4"
+    }
+  }
+}
 ```
 
 Rules:
@@ -127,9 +162,10 @@ Rules:
 - Policies require a non-empty `name`, a `mode` of `whitelist` or `blacklist`,
   and a non-empty `models` list of configured aliases. Policy names must be
   unique, and every key `policy` reference must exist.
-- Unknown TOML fields, duplicate key names, duplicate resolved key values,
-  missing environment variables, invalid URLs, and zero models fail startup.
-- `[server].listen` and `read_header_timeout` changes require a restart; other
+- Unknown JSON fields, duplicate virtual key names, duplicate resolved key
+  values, missing environment variables, invalid URLs, and zero models fail
+  startup.
+- `server.listen` and `read_header_timeout` changes require a restart; other
   values can be reloaded with `SIGHUP`.
 
 ### Model aliases
@@ -156,12 +192,23 @@ provider) and at the model level (overrides). Nested JSON objects are merged
 recursively; scalars and arrays from the more specific config replace the base
 value.
 
-```toml
-[providers.openrouter.extra_body]
-provider = { zdr = true, data_collection = "deny" }
-
-[models.fast.extra_body]
-provider = { order = ["openai"], allow_fallbacks = false }
+```json
+{
+  "providers": {
+    "openrouter": {
+      "extra_body": {
+        "provider": {"zdr": true, "data_collection": "deny"}
+      }
+    }
+  },
+  "models": {
+    "fast": {
+      "extra_body": {
+        "provider": {"order": ["openai"], "allow_fallbacks": false}
+      }
+    }
+  }
+}
 ```
 
 The example above sends this `provider` object for the `fast` alias:
@@ -233,7 +280,7 @@ Secrets, prompts, and response bodies are never logged.
 kill -HUP "$(pidof model-proxy)"
 ```
 
-`SIGHUP` re-reads the TOML file and its `.env`, validates everything, rebuilds
+`SIGHUP` re-reads the JSON file and its `.env`, validates everything, rebuilds
 providers, and atomically swaps the config. Invalid reloads leave the old config
 active and log an error. In-flight requests keep the config snapshot they
 started with.
@@ -246,7 +293,7 @@ started with.
 ```sh
 docker build -t model-proxy .
 docker run --rm -p 8080:8080 \
-  -v "$PWD/config.toml:/etc/model-proxy/config.toml:ro" \
+  -v "$PWD/config.json:/etc/model-proxy/config.json:ro" \
   --env-file .env \
   model-proxy
 ```

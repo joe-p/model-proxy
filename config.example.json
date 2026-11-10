@@ -1,0 +1,77 @@
+{
+  "env_file": ".env",
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "max_body_bytes": 1048576,
+    "read_header_timeout": "10s",
+    "shutdown_timeout": "15s"
+  },
+  "logging": {
+    "format": "json",
+    "level": "info",
+    "log_usage": true
+  },
+  "auth": {
+    "enabled": true
+  },
+  "virtual_keys": [
+    {
+      "name": "laptop",
+      "key_env": "PROXY_KEY_LAPTOP",
+      "policy": "basic"
+    },
+    {
+      "name": "ci",
+      "key_env": "PROXY_KEY_CI",
+      "policy": "no-smart"
+    },
+    {
+      "name": "admin",
+      "key_env": "PROXY_KEY_ADMIN"
+    }
+  ],
+  "policies": [
+    {
+      "name": "basic",
+      "mode": "whitelist",
+      "models": ["fast"]
+    },
+    {
+      "name": "no-smart",
+      "mode": "blacklist",
+      "models": ["smart"]
+    }
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "dial_timeout": "10s",
+      "response_header_timeout": "120s",
+      "referer": "https://example.com",
+      "title": "model-proxy",
+      "extra_body": {
+        "provider": {
+          "zdr": true,
+          "data_collection": "deny"
+        }
+      }
+    }
+  },
+  "models": {
+    "fast": {
+      "provider": "openrouter",
+      "upstream": "openai/gpt-4o-mini",
+      "extra_body": {
+        "provider": {
+          "order": ["openai"],
+          "allow_fallbacks": false
+        }
+      }
+    },
+    "smart": {
+      "provider": "openrouter",
+      "upstream": "anthropic/claude-sonnet-4"
+    }
+  }
+}

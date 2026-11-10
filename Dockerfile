@@ -20,4 +20,4 @@ COPY --from=build /out/model-proxy /usr/local/bin/model-proxy
 
 USER nobody
 EXPOSE 8080
-ENTRYPOINT ["model-proxy", "-config", "/etc/model-proxy/config.toml"]
+ENTRYPOINT ["model-proxy", "-config", "/etc/model-proxy/config.json"]

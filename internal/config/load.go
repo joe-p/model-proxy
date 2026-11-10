@@ -2,71 +2,72 @@ package config
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
 	"github.com/joho/godotenv"
-	"github.com/pelletier/go-toml/v2"
 )
 
 type rawConfig struct {
-	EnvFile     string                 `toml:"env_file"`
-	Server      rawServer              `toml:"server"`
-	Logging     rawLogging             `toml:"logging"`
-	Auth        *rawAuth               `toml:"auth"`
-	VirtualKeys []rawVirtualKey        `toml:"virtual_keys"`
-	Policies    []rawPolicy            `toml:"policies"`
-	Providers   map[string]rawProvider `toml:"providers"`
-	Models      map[string]rawModel    `toml:"models"`
+	EnvFile     string                 `json:"env_file"`
+	Server      rawServer              `json:"server"`
+	Logging     rawLogging             `json:"logging"`
+	Auth        *rawAuth               `json:"auth"`
+	VirtualKeys []rawVirtualKey        `json:"virtual_keys"`
+	Policies    []rawPolicy            `json:"policies"`
+	Providers   map[string]rawProvider `json:"providers"`
+	Models      map[string]rawModel    `json:"models"`
 }
 
 type rawServer struct {
-	Listen            *string `toml:"listen"`
-	MaxBodyBytes      *int64  `toml:"max_body_bytes"`
-	ReadHeaderTimeout *string `toml:"read_header_timeout"`
-	ShutdownTimeout   *string `toml:"shutdown_timeout"`
+	Listen            *string `json:"listen"`
+	MaxBodyBytes      *int64  `json:"max_body_bytes"`
+	ReadHeaderTimeout *string `json:"read_header_timeout"`
+	ShutdownTimeout   *string `json:"shutdown_timeout"`
 }
 
 type rawLogging struct {
-	Format   *string `toml:"format"`
-	Level    *string `toml:"level"`
-	LogUsage *bool   `toml:"log_usage"`
+	Format   *string `json:"format"`
+	Level    *string `json:"level"`
+	LogUsage *bool   `json:"log_usage"`
 }
 
 type rawAuth struct {
-	Enabled *bool `toml:"enabled"`
+	Enabled *bool `json:"enabled"`
 }
 
 type rawVirtualKey struct {
-	Name   string `toml:"name"`
-	KeyEnv string `toml:"key_env"`
-	Policy string `toml:"policy"`
+	Name   string `json:"name"`
+	KeyEnv string `json:"key_env"`
+	Policy string `json:"policy"`
 }
 
 type rawPolicy struct {
-	Name   string   `toml:"name"`
-	Mode   string   `toml:"mode"`
-	Models []string `toml:"models"`
+	Name   string   `json:"name"`
+	Mode   string   `json:"mode"`
+	Models []string `json:"models"`
 }
 
 type rawProvider struct {
-	BaseURL               string         `toml:"base_url"`
-	APIKeyEnv             string         `toml:"api_key_env"`
-	DialTimeout           *string        `toml:"dial_timeout"`
-	ResponseHeaderTimeout *string        `toml:"response_header_timeout"`
-	Referer               string         `toml:"referer"`
-	Title                 string         `toml:"title"`
-	ExtraBody             map[string]any `toml:"extra_body"`
+	BaseURL               string         `json:"base_url"`
+	APIKeyEnv             string         `json:"api_key_env"`
+	DialTimeout           *string        `json:"dial_timeout"`
+	ResponseHeaderTimeout *string        `json:"response_header_timeout"`
+	Referer               string         `json:"referer"`
+	Title                 string         `json:"title"`
+	ExtraBody             map[string]any `json:"extra_body"`
 }
 
 type rawModel struct {
-	Provider  string         `toml:"provider"`
-	Upstream  string         `toml:"upstream"`
-	ExtraBody map[string]any `toml:"extra_body"`
+	Provider  string         `json:"provider"`
+	Upstream  string         `json:"upstream"`
+	ExtraBody map[string]any `json:"extra_body"`
 }
 
-// Load reads, resolves, and validates a TOML configuration file. An optional
+// Load reads, resolves, and validates a JSON configuration file. An optional
 // env_file, relative to the config file, is loaded before key_env references
 // are resolved. Real process environment variables take precedence over values
 // from the env file.
@@ -82,10 +83,14 @@ func Load(path string) (*Config, error) {
 	}
 
 	var raw rawConfig
-	dec := toml.NewDecoder(bytes.NewReader(data))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
+	dec.UseNumber()
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", abs, err)
+	}
+	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
+		return nil, fmt.Errorf("parse config %s: unexpected trailing data", abs)
 	}
 
 	envPath := ""

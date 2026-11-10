@@ -10,19 +10,20 @@ import (
 	"time"
 )
 
-const baseConfig = `
-[[virtual_keys]]
-name = "laptop"
-key_env = "PROXY_KEY"
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`
+const baseConfig = `{
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`
 
 func writeFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
@@ -51,7 +52,21 @@ func unsetEnv(t *testing.T, name string) {
 func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".env", "PROXY_KEY=from-file\nOPENROUTER_KEY=upstream-from-file\n")
-	path := writeFile(t, dir, "config.toml", "env_file = \".env\"\n"+baseConfig)
+	path := writeFile(t, dir, "config.json", `{
+  "env_file": ".env",
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 
 	t.Setenv("PROXY_KEY", "from-process")
 	unsetEnv(t, "OPENROUTER_KEY")
@@ -89,49 +104,74 @@ func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", baseConfig+"\n[server]\nunknown_setting = true\n")
+	path := writeFile(t, dir, "config.json", `{
+  "server": {"unknown_setting": true},
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "strict mode") {
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("expected unknown field error, got %v", err)
+	}
+}
+
+func TestLoadRejectsTrailingData(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", baseConfig+"\n{}")
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "trailing data") {
+		t.Fatalf("expected trailing data error, got %v", err)
 	}
 }
 
 func TestLoadRejectsPlaintextKeyField(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[[virtual_keys]]
-name = "laptop"
-key = "plaintext"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "laptop", "key": "plaintext"}
+  ]
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
-	if err == nil || !strings.Contains(err.Error(), "strict mode") {
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("expected unknown field error for key, got %v", err)
 	}
 }
 
 func TestLoadRejectsDuplicateResolvedKeys(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[[virtual_keys]]
-name = "one"
-key_env = "KEY_ONE"
-[[virtual_keys]]
-name = "two"
-key_env = "KEY_TWO"
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "one", "key_env": "KEY_ONE"},
+    {"name": "two", "key_env": "KEY_TWO"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("KEY_ONE", "same")
 	t.Setenv("KEY_TWO", "same")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -144,7 +184,7 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadRejectsMissingEnv(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", baseConfig)
+	path := writeFile(t, dir, "config.json", baseConfig)
 	unsetEnv(t, "PROXY_KEY")
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
@@ -156,15 +196,17 @@ func TestLoadRejectsMissingEnv(t *testing.T) {
 
 func TestLoadRequiresKeysWhenAuthEnabled(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
@@ -175,18 +217,18 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadAllowsNoKeysWhenAuthDisabled(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[auth]
-enabled = false
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	cfg, err := Load(path)
@@ -200,18 +242,18 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadRejectsUnknownProviderReference(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[auth]
-enabled = false
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "missing"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "missing", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
@@ -222,7 +264,21 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadRejectsInvalidDuration(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", baseConfig+"\n[server]\nread_header_timeout = \"soon\"\n")
+	path := writeFile(t, dir, "config.json", `{
+  "server": {"read_header_timeout": "soon"},
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
@@ -234,7 +290,21 @@ func TestLoadRejectsInvalidDuration(t *testing.T) {
 
 func TestLoadRejectsMissingEnvFile(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", "env_file = \".env\"\n"+baseConfig)
+	path := writeFile(t, dir, "config.json", `{
+  "env_file": ".env",
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
@@ -246,32 +316,25 @@ func TestLoadRejectsMissingEnvFile(t *testing.T) {
 
 func TestLoadResolvesPoliciesAndKeyReferences(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[[virtual_keys]]
-name = "laptop"
-key_env = "PROXY_KEY"
-policy = "basic"
-[[virtual_keys]]
-name = "unrestricted"
-key_env = "PROXY_KEY_2"
-
-[[policies]]
-name = "basic"
-mode = "whitelist"
-models = ["fast"]
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-
-[models.smart]
-provider = "openrouter"
-upstream = "anthropic/claude-sonnet-4"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY", "policy": "basic"},
+    {"name": "unrestricted", "key_env": "PROXY_KEY_2"}
+  ],
+  "policies": [
+    {"name": "basic", "mode": "whitelist", "models": ["fast"]}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"},
+    "smart": {"provider": "openrouter", "upstream": "anthropic/claude-sonnet-4"}
+  }
+}`)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("PROXY_KEY_2", "secret-2")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -303,20 +366,20 @@ upstream = "anthropic/claude-sonnet-4"
 
 func TestLoadRejectsUnknownPolicyReference(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[[virtual_keys]]
-name = "laptop"
-key_env = "PROXY_KEY"
-policy = "missing"
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "virtual_keys": [
+    {"name": "laptop", "key_env": "PROXY_KEY", "policy": "missing"}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
@@ -328,23 +391,21 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadRejectsUnknownModelInPolicy(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[auth]
-enabled = false
-
-[[policies]]
-name = "basic"
-mode = "blacklist"
-models = ["missing"]
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "policies": [
+    {"name": "basic", "mode": "blacklist", "models": ["missing"]}
+  ],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
@@ -359,22 +420,26 @@ func TestLoadRejectsInvalidPolicy(t *testing.T) {
 		policy string
 		want   string
 	}{
-		{name: "mode", policy: "name = \"p\"\nmode = \"allow\"\nmodels = [\"fast\"]", want: "mode"},
-		{name: "empty models", policy: "name = \"p\"\nmode = \"whitelist\"\nmodels = []", want: "models"},
-		{name: "duplicate name", policy: "name = \"p\"\nmode = \"whitelist\"\nmodels = [\"fast\"]\n[[policies]]\nname = \"p\"\nmode = \"blacklist\"\nmodels = [\"fast\"]", want: "duplicate policy"},
+		{name: "mode", policy: `{"name": "p", "mode": "allow", "models": ["fast"]}`, want: "mode"},
+		{name: "empty models", policy: `{"name": "p", "mode": "whitelist", "models": []}`, want: "models"},
+		{name: "duplicate name", policy: `{"name": "p", "mode": "whitelist", "models": ["fast"]}, {"name": "p", "mode": "blacklist", "models": ["fast"]}`, want: "duplicate policy"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			path := writeFile(t, dir, "config.toml", "[auth]\nenabled = false\n\n[[policies]]\n"+tc.policy+"\n"+`
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-`)
+			path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "policies": [`+tc.policy+`],
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
 			t.Setenv("OPENROUTER_KEY", "upstream")
 			_, err := Load(path)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -386,29 +451,32 @@ upstream = "openai/gpt-4o-mini"
 
 func TestLoadMergesExtraBody(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.toml", `
-[auth]
-enabled = false
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[providers.openrouter.extra_body]
-provider = { zdr = true, data_collection = "deny" }
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-
-[models.fast.extra_body]
-provider = { order = ["openai"] }
-transforms = ["middle-out"]
-
-[models.smart]
-provider = "openrouter"
-upstream = "anthropic/claude-sonnet-4"
-`)
+	path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY",
+      "extra_body": {
+        "provider": {"zdr": true, "data_collection": "deny"}
+      }
+    }
+  },
+  "models": {
+    "fast": {
+      "provider": "openrouter",
+      "upstream": "openai/gpt-4o-mini",
+      "extra_body": {
+        "provider": {"order": ["openai"]},
+        "transforms": ["middle-out"]
+      }
+    },
+    "smart": {
+      "provider": "openrouter",
+      "upstream": "anthropic/claude-sonnet-4"
+    }
+  }
+}`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	cfg, err := Load(path)
@@ -442,21 +510,22 @@ func TestLoadRejectsReservedExtraBodyFields(t *testing.T) {
 	for _, field := range []string{"model", "messages", "stream", "models", "route", "plugins"} {
 		t.Run(field, func(t *testing.T) {
 			dir := t.TempDir()
-			path := writeFile(t, dir, "config.toml", `
-[auth]
-enabled = false
-
-[providers.openrouter]
-base_url = "https://openrouter.ai/api/v1"
-api_key_env = "OPENROUTER_KEY"
-
-[models.fast]
-provider = "openrouter"
-upstream = "openai/gpt-4o-mini"
-
-[models.fast.extra_body]
-`+field+` = true
-`)
+			path := writeFile(t, dir, "config.json", `{
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {
+      "provider": "openrouter",
+      "upstream": "openai/gpt-4o-mini",
+      "extra_body": {"`+field+`": true}
+    }
+  }
+}`)
 			t.Setenv("OPENROUTER_KEY", "upstream")
 
 			_, err := Load(path)
