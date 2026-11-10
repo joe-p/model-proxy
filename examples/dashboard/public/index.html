@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>model-proxy usage</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --text: #16181d;
+        --muted: #6b7280;
+        --border: #e5e7eb;
+        --accent: #2563eb;
+        --bar: #93c5fd;
+        --bad: #dc2626;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115;
+          --panel: #171a21;
+          --text: #e6e8ec;
+          --muted: #9aa3b2;
+          --border: #252a34;
+          --accent: #60a5fa;
+          --bar: #1d4ed8;
+          --bad: #f87171;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 24px;
+        border-bottom: 1px solid var(--border);
+      }
+      h1 {
+        margin: 0;
+        font-size: 18px;
+        letter-spacing: -0.01em;
+      }
+      h2 {
+        margin: 0 0 12px;
+        font-size: 15px;
+      }
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+      }
+      .controls label {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        color: var(--muted);
+      }
+      select {
+        padding: 6px 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font: inherit;
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+      .card {
+        padding: 14px 16px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+      }
+      .card .label {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .card strong {
+        display: block;
+        margin-top: 4px;
+        font-size: 24px;
+        font-variant-numeric: tabular-nums;
+      }
+      .card .hint {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .panel {
+        padding: 16px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--panel);
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-variant-numeric: tabular-nums;
+      }
+      th,
+      td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        text-align: right;
+        white-space: nowrap;
+        vertical-align: top;
+      }
+      th:first-child,
+      td:first-child {
+        text-align: left;
+      }
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+      tbody tr:last-child td {
+        border-bottom: none;
+      }
+      .model {
+        font-weight: 600;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .zero {
+        color: var(--muted);
+      }
+      .neg {
+        color: var(--bad);
+      }
+      .bar {
+        position: relative;
+        min-width: 80px;
+        height: 6px;
+        margin-top: 5px;
+        overflow: hidden;
+        border-radius: 3px;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+      .bar span {
+        position: absolute;
+        inset: 0 auto 0 0;
+        border-radius: 3px;
+        background: var(--bar);
+      }
+      .empty {
+        padding: 32px 8px;
+        color: var(--muted);
+        text-align: center;
+      }
+      #error {
+        display: none;
+        max-width: 1100px;
+        margin: 16px auto 0;
+        padding: 10px 14px;
+        border: 1px solid var(--bad);
+        border-radius: 8px;
+        color: var(--bad);
+      }
+      footer {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 24px 32px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      @media (max-width: 640px) {
+        th:nth-child(3),
+        td:nth-child(3),
+        th:nth-child(4),
+        td:nth-child(4) {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>model-proxy usage</h1>
+      <div class="controls">
+        <label>
+          Range
+          <select id="range">
+            <option value="24">Last 24h</option>
+            <option value="168">Last 7d</option>
+            <option value="720">Last 30d</option>
+          </select>
+        </label>
+        <label>
+          <input type="checkbox" id="includeSub" />
+          Include subscription estimated cost
+        </label>
+      </div>
+    </header>
+
+    <div id="error" role="alert"></div>
+
+    <main>
+      <section class="cards">
+        <div class="card">
+          <span class="label">Total cost</span>
+          <strong id="totalCost">—</strong>
+          <span class="hint" id="costNote"></span>
+        </div>
+        <div class="card">
+          <span class="label">Reported cost</span>
+          <strong id="reportedCost">—</strong>
+          <span class="hint">billed by the upstream</span>
+        </div>
+        <div class="card">
+          <span class="label">Subscription estimate</span>
+          <strong id="subCost">—</strong>
+          <span class="hint" id="subNote"></span>
+        </div>
+        <div class="card">
+          <span class="label">Requests</span>
+          <strong id="requests">—</strong>
+          <span class="hint" id="requestNote"></span>
+        </div>
+        <div class="card">
+          <span class="label">Tokens</span>
+          <strong id="tokens">—</strong>
+          <span class="hint" id="tokenNote"></span>
+        </div>
+        <div class="card">
+          <span class="label">Avg latency</span>
+          <strong id="latency">—</strong>
+          <span class="hint" id="latencyNote"></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Model breakdown</h2>
+        <table id="models">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Requests</th>
+              <th>Prompt</th>
+              <th>Completion</th>
+              <th>Reported</th>
+              <th>Subscription</th>
+              <th>Total</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="empty" hidden>
+          No usage recorded in this range yet. Send a request through the proxy.
+        </p>
+      </section>
+    </main>
+
+    <footer id="updated"></footer>
+
+    <script>
+      const state = { hours: 24, includeSub: false };
+
+      const $ = (id) => document.getElementById(id);
+      const usd = (value) => {
+        const n = Number(value) || 0;
+        const abs = Math.abs(n);
+        // Usage rows are often fractions of a cent; keep enough precision.
+        const digits = abs > 0 && abs < 0.01 ? 6 : abs < 1 ? 4 : 2;
+        return n.toLocaleString(undefined, {
+          style: 'currency',
+          currency: 'USD',
+          minimumFractionDigits: digits,
+          maximumFractionDigits: digits,
+        });
+      };
+      const count = (value) => (Number(value) || 0).toLocaleString();
+      const compact = (value) =>
+        (Number(value) || 0).toLocaleString(undefined, {
+          notation: 'compact',
+          maximumFractionDigits: 1,
+        });
+
+      function showError(message) {
+        const banner = $('error');
+        banner.textContent = message;
+        banner.style.display = 'block';
+      }
+
+      function clearError() {
+        $('error').style.display = 'none';
+      }
+
+      function cell(value, note, muted) {
+        const td = document.createElement('td');
+        const main = document.createElement('span');
+        main.textContent = value;
+        if (muted) main.className = 'zero';
+        td.append(main);
+        if (note) {
+          const sub = document.createElement('div');
+          sub.className = 'sub';
+          sub.textContent = note;
+          td.append(sub);
+        }
+        return td;
+      }
+
+      function renderModels(models) {
+        const tbody = document.querySelector('#models tbody');
+        tbody.textContent = '';
+        $('empty').hidden = models.length > 0;
+        if (models.length === 0) return;
+
+        const max = models.reduce((m, row) => Math.max(m, row.totalCostUsd), 0) || 1;
+
+        for (const model of models) {
+          const tr = document.createElement('tr');
+
+          const nameCell = document.createElement('td');
+          const name = document.createElement('div');
+          name.className = 'model';
+          name.textContent = model.model;
+          nameCell.append(name);
+          if (model.provider) {
+            const provider = document.createElement('div');
+            provider.className = 'sub';
+            provider.textContent = model.provider;
+            nameCell.append(provider);
+          }
+          tr.append(nameCell);
+
+          tr.append(
+            cell(
+              count(model.requests),
+              model.errors ? `${count(model.errors)} errors` : '',
+              false,
+            ),
+          );
+          if (model.errors) tr.lastChild.querySelector('.sub')?.classList.add('neg');
+
+          tr.append(cell(compact(model.promptTokens), '', !model.promptTokens));
+          tr.append(cell(compact(model.completionTokens), '', !model.completionTokens));
+          tr.append(
+            cell(usd(model.reportedCostUsd), '', model.reportedCostUsd === 0),
+          );
+
+          const sub = cell(
+            model.subscriptionEstimateUsd ? usd(model.subscriptionEstimateUsd) : '—',
+            '',
+            !model.subscriptionEstimateUsd,
+          );
+          tr.append(sub);
+
+          const total = cell(usd(model.totalCostUsd), '', model.totalCostUsd === 0);
+          const bar = document.createElement('div');
+          bar.className = 'bar';
+          const fill = document.createElement('span');
+          fill.style.width = `${Math.max(2, (model.totalCostUsd / max) * 100)}%`;
+          bar.append(fill);
+          total.append(bar);
+          tr.append(total);
+
+          tbody.append(tr);
+        }
+      }
+
+      function render(data) {
+        const s = data.summary;
+        $('totalCost').textContent = usd(s.totalCostUsd);
+        $('costNote').textContent = state.includeSub
+          ? 'reported + estimates, incl. subscription'
+          : 'reported + API estimates, excl. subscription';
+        $('reportedCost').textContent = usd(s.reportedCostUsd);
+        $('subCost').textContent = usd(s.subscriptionEstimateUsd);
+        $('subNote').textContent = state.includeSub
+          ? 'included in total'
+          : 'not included in total';
+        $('requests').textContent = count(s.requests);
+        $('requestNote').textContent = s.errors
+          ? `${count(s.errors)} errors`
+          : 'no errors';
+        $('requestNote').className = s.errors ? 'hint neg' : 'hint';
+        $('tokens').textContent = compact(s.totalTokens);
+        $('tokenNote').textContent = `${compact(s.promptTokens)} prompt · ${compact(
+          s.completionTokens,
+        )} completion`;
+        $('latency').textContent = `${Math.round(s.avgDurationMs)} ms`;
+        $('latencyNote').textContent = `${count(s.streamed)} streamed`;
+        renderModels(data.models);
+        $('updated').textContent = `Updated ${new Date().toLocaleTimeString()} · range starts ${new Date(
+          data.range.from,
+        ).toLocaleString()}`;
+      }
+
+      async function load() {
+        const params = new URLSearchParams({
+          hours: String(state.hours),
+          includeSubscription: state.includeSub ? '1' : '0',
+        });
+        const response = await fetch(`/api/usage?${params}`);
+        if (!response.ok) throw new Error(`request failed: HTTP ${response.status}`);
+        render(await response.json());
+        clearError();
+      }
+
+      async function refresh() {
+        try {
+          await load();
+        } catch (err) {
+          showError(err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      $('range').addEventListener('change', (event) => {
+        state.hours = Number(event.target.value);
+        refresh();
+      });
+
+      $('includeSub').addEventListener('change', (event) => {
+        state.includeSub = event.target.checked;
+        refresh();
+      });
+
+      if (location.protocol === 'file:') {
+        // Opening public/index.html from disk cannot reach the collector's API.
+        showError(
+          'This page was loaded from disk. Start the collector and open http://127.0.0.1:8787 instead.',
+        );
+      } else {
+        refresh();
+        setInterval(refresh, 15000);
+      }
+    </script>
+  </body>
+</html>

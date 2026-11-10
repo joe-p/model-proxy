@@ -881,6 +881,10 @@ Notes for a consumer that stores these rows:
 - `billing_mode: subscription` means token usage did not incur per-token cost,
   so a missing `cost_usd` is expected.
 
+`examples/dashboard/` contains a runnable TypeScript collector that parses this
+stream into SQLite and serves a dashboard with cost totals, a subscription
+estimate toggle, and a per-model breakdown.
+
 ## Reload and shutdown
 
 ```sh

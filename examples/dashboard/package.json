@@ -1,0 +1,19 @@
+{
+  "name": "model-proxy-usage-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example: parse model-proxy JSON access logs into SQLite and serve a usage dashboard",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
