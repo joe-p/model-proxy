@@ -12,6 +12,14 @@
     "max_body_bytes": 1048576,
     "read_header_timeout": "10s",
     "shutdown_timeout": "15s"
+
+    // Optional administrative API. It serves POST /admin/reload and
+    // GET /admin/status on a separate listener. Disabled when admin_listen is
+    // empty, which also disables configuration reload. admin_listen must differ
+    // from listen, and admin_token_env must resolve to a non-empty value.
+    // The token is read once at startup; rotating it requires a restart.
+    // "admin_listen": "127.0.0.1:8081",
+    // "admin_token_env": "MODEL_PROXY_ADMIN_TOKEN"
   },
 
   "logging": {

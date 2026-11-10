@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -19,6 +18,7 @@ type state struct {
 	pricing   CostEstimator
 	logger    *slog.Logger
 	claudeSub provider.TransparentProxy
+	reloader  Reloader
 }
 
 // Option customizes a Server. It is used to inject the Claude subscription
@@ -84,13 +84,17 @@ func (c *modelsCache) clear() {
 }
 
 type Server struct {
-	state      atomic.Pointer[state]
-	mux        *http.ServeMux
-	httpServer *http.Server
-	startedAt  time.Time
-	reloadMu   sync.Mutex
-	models     modelsCache
-	options    []Option
+	state        atomic.Pointer[state]
+	mux          *http.ServeMux
+	httpServer   *http.Server
+	adminMux     *http.ServeMux
+	adminServer  *http.Server
+	adminHandler http.Handler
+	startedAt    time.Time
+	reloadMu     sync.Mutex
+	reloadInfo   reloadRecord
+	models       modelsCache
+	options      []Option
 }
 
 // passthroughModels returns the upstream model ids a passthrough provider
@@ -155,7 +159,43 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
+
+	// The administrative API lives on its own listener. Reload is never exposed
+	// on the public port, so enabling it is an explicit opt-in that also requires
+	// a token to be configured.
+	s.adminMux = http.NewServeMux()
+	s.adminMux.HandleFunc("/admin/reload", s.handleAdminReload)
+	s.adminMux.HandleFunc("/admin/status", s.handleAdminStatus)
+	s.adminMux.HandleFunc("/healthz", s.handleHealth)
+	s.adminMux.HandleFunc("/", s.handleNotFound)
+	s.adminHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.serve(s.adminMux, false, w, r)
+	})
+	if cfg.Server.AdminEnabled() {
+		s.adminServer = &http.Server{
+			Addr:              cfg.Server.AdminListen,
+			Handler:           s.adminHandler,
+			ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+			ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		}
+	}
 	return s
+}
+
+// AdminEnabled reports whether the administrative listener is configured.
+func (s *Server) AdminEnabled() bool { return s.adminServer != nil }
+
+// ListenAndServeAdmin serves the administrative API. It is a no-op when no
+// admin listener is configured.
+func (s *Server) ListenAndServeAdmin() error {
+	if s.adminServer == nil {
+		return nil
+	}
+	err := s.adminServer.ListenAndServe()
+	if err == http.ErrServerClosed {
+		return nil
+	}
+	return err
 }
 
 // applyCORSHeaders exposes the proxy to browser-based OpenRouter clients.
@@ -176,7 +216,13 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.httpServer.Shutdown(ctx)
+	err := s.httpServer.Shutdown(ctx)
+	if s.adminServer != nil {
+		if adminErr := s.adminServer.Shutdown(ctx); err == nil {
+			err = adminErr
+		}
+	}
+	return err
 }
 
 func (s *Server) ShutdownTimeout() time.Duration {
@@ -192,10 +238,18 @@ func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provid
 
 	old := s.state.Load()
 	if cfg.Server.Listen != old.cfg.Server.Listen {
-		return fmt.Errorf("server.listen changes require a restart")
+		return errRestartRequired("server.listen")
 	}
 	if cfg.Server.ReadHeaderTimeout != old.cfg.Server.ReadHeaderTimeout {
-		return fmt.Errorf("server.read_header_timeout changes require a restart")
+		return errRestartRequired("server.read_header_timeout")
+	}
+	// The admin surface is bound at startup and must not be movable, or a reload
+	// could silently expose it on a public interface.
+	if cfg.Server.AdminListen != old.cfg.Server.AdminListen {
+		return errRestartRequired("server.admin_listen")
+	}
+	if cfg.Server.AdminToken != old.cfg.Server.AdminToken {
+		return errRestartRequired("server.admin_token_env")
 	}
 	if providers == nil {
 		providers = map[string]provider.Provider{}
@@ -223,6 +277,13 @@ func newState(cfg *config.Config, providers map[string]provider.Provider, logger
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.serve(s.mux, true, w, r)
+}
+
+// serve runs a request against one of the server's muxes. Administrative routes
+// pass cors=false: they must not answer browser preflights with a wildcard
+// origin, which would make the admin credential replayable from a web page.
+func (s *Server) serve(mux *http.ServeMux, cors bool, w http.ResponseWriter, r *http.Request) {
 	st := s.state.Load()
 	lr := &requestLog{
 		requestID:  requestIDFrom(r),
@@ -233,7 +294,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("X-Request-ID", lr.requestID)
-	applyCORSHeaders(w.Header())
+	if cors {
+		applyCORSHeaders(w.Header())
+	}
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -245,7 +308,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	rec := &responseRecorder{ResponseWriter: w}
 	start := time.Now()
-	s.mux.ServeHTTP(rec, r)
+	mux.ServeHTTP(rec, r)
 
 	status := rec.status
 	if status == 0 {

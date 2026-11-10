@@ -42,7 +42,8 @@ proxying at `/claude_sub/`.
   logging still enabled.
 - Subscription billing-mode tagging for providers such as Codex.
 - Optional models.dev list-price estimates with a configurable refresh timer.
-- Atomic `SIGHUP` reload.
+- Atomic configuration reload over an admin-only `POST /admin/reload` endpoint,
+  with read-only `GET /admin/status` introspection.
 
 ## Quick start
 
@@ -291,8 +292,13 @@ Rules:
   values, missing environment variables, invalid URLs, and zero models fail
   startup. Zero models are allowed when `enable_claude_subscription` is true,
   because `/claude_sub/` forwards model ids without an alias registry.
-- `server.listen` and `read_header_timeout` changes require a restart; other
-  values can be reloaded with `SIGHUP`.
+- `server.listen`, `server.read_header_timeout`, `server.admin_listen`, and
+  `server.admin_token_env` changes require a restart; other values can be
+  reloaded through `POST /admin/reload`.
+- `server.admin_listen` enables the administrative API on a second listener and
+  requires `server.admin_token_env`. It must differ from `server.listen` and
+  defaults to disabled, which leaves reload unavailable. See
+  [Reload and shutdown](#reload-and-shutdown).
 - For `codex` providers, `auth_dir` defaults to `$CODEX_HOME` or `~/.codex`.
   `auth_dir` is rejected for other provider types.
 - `billing_mode` is an optional per-provider log label. It defaults to
@@ -534,7 +540,7 @@ an alias when you want a stable name or request-body overrides.
 - **`GET /v1/models` includes discovered ids.** For each passthrough provider the
   proxy asks the upstream for its model list and merges it with the aliases,
   honoring the authenticated key's policy. Results are cached for one minute and
-  cleared on `SIGHUP`; a failing or unsupported listing is logged and skipped, so
+  cleared on reload; a failing or unsupported listing is logged and skipped, so
   the aliases are still returned.
 
 The proxy lists models with `GET <base_url>/models`, reading either
@@ -731,7 +737,7 @@ API-equivalent cost from the [models.dev](https://models.dev) catalog:
 The catalog is loaded from the cache at startup and refreshed in the background
 every `refresh_interval`. A failed refresh keeps the previous catalog; a missing
 cache is not fatal, and estimates are simply unavailable until the first
-successful fetch. `SIGHUP` rebuilds the pricing loop along with the rest of the
+successful fetch. A reload rebuilds the pricing loop along with the rest of the
 configuration.
 
 Provider-to-catalog mapping uses `pricing_provider`, which defaults to `openai`
@@ -873,7 +879,8 @@ With `logging.format` set to `json`, every request produces one line-delimited
 JSON object on stdout. Access records have `msg` equal to `request` and are
 emitted at `INFO`, except `/healthz`, which is `DEBUG`. A log consumer should
 filter on `msg == "request"` and skip other records (startup, reload, and
-internal errors share the same stream).
+internal errors share the same stream). Reload requests are logged like any
+other request, with `path` set to `/admin/reload`.
 
 | Field | Type | Present | Meaning |
 | --- | --- | --- | --- |
@@ -939,14 +946,64 @@ buckets, and a per-model breakdown.
 
 ## Reload and shutdown
 
-```sh
-kill -HUP "$(pidof model-proxy)"
+Reload is exposed only over the administrative API, which listens on its own
+port and is disabled by default. Enable it with two settings:
+
+```jsonc
+"server": {
+  "listen": "127.0.0.1:8080",
+  "admin_listen": "127.0.0.1:8081",
+  "admin_token_env": "MODEL_PROXY_ADMIN_TOKEN"
+}
 ```
 
-`SIGHUP` re-reads the JSON file and its `.env`, validates everything, rebuilds
-providers, and atomically swaps the config. Invalid reloads leave the old config
-active and log an error. In-flight requests keep the config snapshot they
-started with.
+```sh
+export MODEL_PROXY_ADMIN_TOKEN=a-long-random-value
+
+curl -fsS -X POST \
+  -H "Authorization: Bearer $MODEL_PROXY_ADMIN_TOKEN" \
+  http://127.0.0.1:8081/admin/reload
+```
+
+```json
+{"status":"ok","changed":true,"config_hash":"9c1f...","models":3,"providers":2,"keys":4,"policies":1,"access_sink":false,"generation":1}
+```
+
+A reload re-reads the JSON file and its `.env`, validates everything, rebuilds
+providers, and atomically swaps the config. In-flight requests keep the config
+snapshot they started with. Failures are reported inline and leave the running
+configuration untouched:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Applied, or `"changed": false` when the file is byte-identical to the last applied version. |
+| `400` | The request carried a body. The endpoint only ever re-reads the configured file. |
+| `401` | Missing or wrong admin token. |
+| `404` | No admin API configured, or the route was called on the public listener. |
+| `409` | The change needs a restart: `server.listen`, `server.read_header_timeout`, `server.admin_listen`, or `server.admin_token_env`. |
+| `422` | The file is unreadable or invalid. The previous config stays active. |
+
+Notes:
+
+- The admin credential is resolved once, at startup, and is never taken from a
+  reloaded file, so configuration cannot grant itself permission to reload.
+  Rotating it requires a restart.
+- `?force=1` rebuilds even when the file is unchanged, which refreshes provider
+  clients and the pricing loop.
+- Administrators can be authenticated with `X-Model-Proxy-Admin` instead of
+  `Authorization` when a client needs that header for something else.
+- Admin routes emit no CORS headers, so they are not reachable from a browser.
+- Reload is available only through this endpoint. No signal triggers one.
+
+`GET /admin/status` returns the resolved, non-secret configuration of the
+running process — model aliases, provider base URLs, virtual key names, and
+policies, plus the applied `generation`, `config_hash`, `last_reload_at`, and
+`last_reload_error`. API keys and virtual key values are never included.
+
+```sh
+curl -fsS -H "Authorization: Bearer $MODEL_PROXY_ADMIN_TOKEN" \
+  http://127.0.0.1:8081/admin/status
+```
 
 `SIGINT` and `SIGTERM` stop accepting requests and wait up to
 `server.shutdown_timeout` for graceful shutdown.

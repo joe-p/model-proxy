@@ -32,6 +32,19 @@ type ServerConfig struct {
 	MaxBodyBytes      int64
 	ReadHeaderTimeout time.Duration
 	ShutdownTimeout   time.Duration
+
+	// AdminListen enables the administrative API on a separate listener. An
+	// empty value disables it and with it the reload endpoint.
+	AdminListen string
+	// AdminToken is the resolved admin credential. It is never logged and never
+	// accepted from a reloaded configuration: a reload cannot change who is
+	// allowed to reload.
+	AdminToken string
+}
+
+// AdminEnabled reports whether the administrative API is configured.
+func (s ServerConfig) AdminEnabled() bool {
+	return s.AdminListen != "" && s.AdminToken != ""
 }
 
 type LoggingConfig struct {

@@ -49,6 +49,9 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 	if err != nil {
 		return nil, err
 	}
+	if err := resolveAdmin(&cfg.Server, raw.Server, dotenv); err != nil {
+		return nil, err
+	}
 
 	// Logging defaults.
 	cfg.Logging = LoggingConfig{Format: "json", Level: slog.LevelInfo, LogUsage: true}
@@ -332,6 +335,43 @@ func validateLogValue(value, field string) error {
 		}
 		return fmt.Errorf("%s contains an invalid control character", field)
 	}
+	return nil
+}
+
+// resolveAdmin resolves the optional administrative API settings. The admin
+// credential is resolved here, once, so that a reload can only ever be
+// authorized by the token the process started with: a configuration file must
+// never be able to grant itself permission to reload.
+func resolveAdmin(cfg *ServerConfig, raw rawServer, dotenv map[string]string) error {
+	cfg.AdminListen = ""
+	if raw.AdminListen != nil {
+		cfg.AdminListen = strings.TrimSpace(*raw.AdminListen)
+	}
+	tokenEnv := ""
+	if raw.AdminTokenEnv != nil {
+		tokenEnv = strings.TrimSpace(*raw.AdminTokenEnv)
+	}
+
+	if cfg.AdminListen == "" {
+		// Without a listener there is nowhere to serve the admin API. A token
+		// configured on its own is harmless; the caller logs that reload is
+		// unavailable.
+		return nil
+	}
+	if cfg.AdminListen == cfg.Listen {
+		return fmt.Errorf("server.admin_listen must differ from server.listen")
+	}
+	if tokenEnv == "" {
+		return fmt.Errorf("server.admin_listen requires server.admin_token_env")
+	}
+	token, ok := lookupEnv(dotenv, tokenEnv)
+	if !ok {
+		return fmt.Errorf("server.admin_token_env: environment variable %s is not set", tokenEnv)
+	}
+	if token == "" {
+		return fmt.Errorf("server.admin_token_env: environment variable %s is empty", tokenEnv)
+	}
+	cfg.AdminToken = token
 	return nil
 }
 

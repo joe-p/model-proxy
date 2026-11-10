@@ -26,6 +26,8 @@ type rawConfig struct {
 
 type rawServer struct {
 	Listen            *string `json:"listen"`
+	AdminListen       *string `json:"admin_listen"`
+	AdminTokenEnv     *string `json:"admin_token_env"`
 	MaxBodyBytes      *int64  `json:"max_body_bytes"`
 	ReadHeaderTimeout *string `json:"read_header_timeout"`
 	ShutdownTimeout   *string `json:"shutdown_timeout"`

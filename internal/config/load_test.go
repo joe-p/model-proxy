@@ -1293,3 +1293,112 @@ func TestLoadRejectsInvalidAccessSink(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadResolvesAdminAPI(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "admin_listen": "127.0.0.1:8081",
+    "admin_token_env": "ADMIN_TOKEN"
+  },
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY"
+    }
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`)
+	t.Setenv("ADMIN_TOKEN", "s3cret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.AdminListen != "127.0.0.1:8081" {
+		t.Fatalf("unexpected admin listen: %q", cfg.Server.AdminListen)
+	}
+	if cfg.Server.AdminToken != "s3cret" {
+		t.Fatalf("admin token not resolved: %q", cfg.Server.AdminToken)
+	}
+	if !cfg.Server.AdminEnabled() {
+		t.Fatal("admin api should be enabled")
+	}
+}
+
+func TestLoadAdminDisabledByDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", baseConfig)
+	t.Setenv("PROXY_KEY", "key")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.AdminListen != "" || cfg.Server.AdminToken != "" || cfg.Server.AdminEnabled() {
+		t.Fatalf("admin api should be disabled by default: %+v", cfg.Server)
+	}
+}
+
+func TestLoadRejectsAdminOnPublicListener(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "admin_listen": "127.0.0.1:8080",
+    "admin_token_env": "ADMIN_TOKEN"
+  },
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("ADMIN_TOKEN", "s3cret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected admin_listen equal to listen to be rejected")
+	}
+}
+
+func TestLoadRequiresAdminTokenForAdminListener(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "server": {"admin_listen": "127.0.0.1:8081"},
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected a missing admin_token_env to be rejected")
+	}
+}
+
+func TestLoadRejectsMissingAdminTokenEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "server": {"admin_listen": "127.0.0.1:8081", "admin_token_env": "ADMIN_TOKEN"},
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+	unsetEnv(t, "ADMIN_TOKEN")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an unset admin token env var to be rejected")
+	}
+}

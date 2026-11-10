@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"syscall"
@@ -49,109 +50,96 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer func() {
-		closeSink(logs.sink, cfg.Server.ShutdownTimeout)
-	}()
 	logger := logs.logger
 	providers, err := buildProviders(cfg)
 	if err != nil {
+		closeSink(logs.sink, cfg.Server.ShutdownTimeout)
 		return err
 	}
 	pricingSvc, pricingCancel := startPricing(cfg, logger)
+
+	// Reload is served over the administrative API; there is no signal-driven
+	// path. The reloader is attached before the listeners start so a request can
+	// never observe a reload that has no server to apply itself to.
+	rl := newReloader(cfg, logs, pricingCancel)
+	srv := server.New(cfg, providers, logger, costEstimator(pricingSvc), server.WithReloader(rl))
+	rl.attach(srv)
+
+	// Release whatever the *current* configuration owns, which may differ from the
+	// startup values after a successful reload.
 	defer func() {
-		if pricingCancel != nil {
-			pricingCancel()
+		currentLogs, currentCancel, timeout := rl.current()
+		if currentCancel != nil {
+			currentCancel()
 		}
+		closeSink(currentLogs.sink, timeout)
 	}()
 
-	srv := server.New(cfg, providers, logger, costEstimator(pricingSvc))
 	logger.Info("starting model-proxy",
 		"version", version,
 		"listen", cfg.Server.Listen,
+		"admin_listen", cfg.Server.AdminListen,
 		"models", len(cfg.Models),
 		"providers", len(cfg.Providers),
 		"policies", len(cfg.Policies),
 		"env_file", cfg.EnvFile,
 		"access_sink", cfg.Logging.AccessSink.Enabled(),
 	)
+	if !cfg.Server.AdminEnabled() {
+		logger.Warn("configuration reload is disabled",
+			"hint", "set server.admin_listen and server.admin_token_env to enable POST /admin/reload")
+	} else if !isLoopbackAddr(cfg.Server.AdminListen) {
+		logger.Warn("admin api is not bound to a loopback address", "admin_listen", cfg.Server.AdminListen)
+	}
 
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- srv.ListenAndServe()
 	}()
+	if srv.AdminEnabled() {
+		go func() {
+			errCh <- srv.ListenAndServeAdmin()
+		}()
+	}
 
+	// Only lifecycle signals are handled. SIGHUP is deliberately left to the
+	// default disposition, which terminates the process: it is not a reload
+	// trigger. Configuration reload is served by POST /admin/reload.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	for {
-		select {
-		case sig := <-sigCh:
-			if sig == syscall.SIGHUP {
-				newCancel, newLogs, reused, err := reload(srv, *configPath, logs)
-				if err != nil {
-					logger.Error("configuration reload failed", "error", err)
-					continue
-				}
-				if pricingCancel != nil {
-					pricingCancel()
-				}
-				pricingCancel = newCancel
-				oldLogs := logs
-				logs = newLogs
-				logger = logs.logger
-				if !reused {
-					closeSinkLater(oldLogs.sink, cfg.Server.ShutdownTimeout)
-				}
-				continue
-			}
-
-			logger.Info("shutting down", "signal", sig.String())
-			ctx, cancel := context.WithTimeout(context.Background(), srv.ShutdownTimeout())
-			shutdownErr := srv.Shutdown(ctx)
-			cancel()
-			if shutdownErr != nil {
-				return fmt.Errorf("shutdown: %w", shutdownErr)
-			}
-			return nil
-
-		case err := <-errCh:
-			return err
-		}
+	select {
+	case sig := <-sigCh:
+		logger.Info("shutting down", "signal", sig.String())
+		return shutdown(srv)
+	case err := <-errCh:
+		_ = shutdown(srv)
+		return err
 	}
 }
 
-func reload(srv *server.Server, path string, current *logRuntime) (context.CancelFunc, *logRuntime, bool, error) {
-	cfg, err := config.Load(path)
-	if err != nil {
-		return nil, nil, false, err
+func shutdown(srv *server.Server) error {
+	ctx, cancel := context.WithTimeout(context.Background(), srv.ShutdownTimeout())
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
 	}
-	providers, err := buildProviders(cfg)
-	if err != nil {
-		return nil, nil, false, err
+	return nil
+}
+
+// isLoopbackAddr reports whether addr binds only to the local host, which is the
+// expected placement for the admin listener.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return false
 	}
-	logs, reused, err := newLogRuntime(cfg, current)
-	if err != nil {
-		return nil, nil, false, err
+	if host == "localhost" {
+		return true
 	}
-	pricingSvc, pricingCancel := startPricing(cfg, logs.logger)
-	if err := srv.Reload(cfg, providers, logs.logger, costEstimator(pricingSvc)); err != nil {
-		if pricingCancel != nil {
-			pricingCancel()
-		}
-		if !reused {
-			closeSink(logs.sink, cfg.Server.ShutdownTimeout)
-		}
-		return nil, nil, false, err
-	}
-	logs.logger.Info("configuration reloaded",
-		"models", len(cfg.Models),
-		"providers", len(cfg.Providers),
-		"keys", len(cfg.Keys),
-		"policies", len(cfg.Policies),
-		"access_sink", cfg.Logging.AccessSink.Enabled(),
-	)
-	return pricingCancel, logs, reused, nil
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // logRuntime owns the logger and, optionally, the HTTP access-log sink that
@@ -163,7 +151,7 @@ type logRuntime struct {
 }
 
 // newLogRuntime builds a logger. When the sink settings are unchanged, it
-// reuses the existing sink so a SIGHUP does not interrupt delivery.
+// reuses the existing sink so a reload does not interrupt delivery.
 func newLogRuntime(cfg *config.Config, current *logRuntime) (*logRuntime, bool, error) {
 	base := logging.New(cfg.Logging.Format, cfg.Logging.Level, os.Stdout)
 	sinkCfg := cfg.Logging.AccessSink
