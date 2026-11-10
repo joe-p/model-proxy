@@ -136,6 +136,10 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		if err != nil {
 			return nil, err
 		}
+		extraBody, err := normalizeExtraBody(rawProvider.ExtraBody, fmt.Sprintf("provider %q extra_body", name))
+		if err != nil {
+			return nil, err
+		}
 		cfg.Providers[name] = ProviderConfig{
 			Name:                  name,
 			BaseURL:               baseURL,
@@ -144,6 +148,7 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 			ResponseHeaderTimeout: responseTimeout,
 			Referer:               strings.TrimSpace(rawProvider.Referer),
 			Title:                 strings.TrimSpace(rawProvider.Title),
+			ExtraBody:             extraBody,
 		}
 	}
 
@@ -161,10 +166,26 @@ func resolve(envPath string, raw rawConfig, dotenv map[string]string) (*Config, 
 		if upstream == "" {
 			return nil, fmt.Errorf("model %q: upstream must not be empty", alias)
 		}
-		if _, ok := cfg.Providers[providerName]; !ok {
+		providerCfg, ok := cfg.Providers[providerName]
+		if !ok {
 			return nil, fmt.Errorf("model %q references unknown provider %q", alias, providerName)
 		}
-		cfg.Models[alias] = ModelConfig{Alias: alias, Provider: providerName, Upstream: upstream}
+		modelExtra, err := normalizeExtraBody(rawModel.ExtraBody, fmt.Sprintf("model %q extra_body", alias))
+		if err != nil {
+			return nil, err
+		}
+		// Provider-level fields are defaults; model-level fields override them.
+		// Nested objects such as OpenRouter's "provider" are merged.
+		effectiveExtra, err := MergeExtraBody(providerCfg.ExtraBody, modelExtra)
+		if err != nil {
+			return nil, fmt.Errorf("model %q extra_body: %w", alias, err)
+		}
+		cfg.Models[alias] = ModelConfig{
+			Alias:     alias,
+			Provider:  providerName,
+			Upstream:  upstream,
+			ExtraBody: effectiveExtra,
+		}
 	}
 	if len(cfg.Models) == 0 {
 		return nil, fmt.Errorf("at least one model must be configured")

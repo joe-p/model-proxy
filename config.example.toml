@@ -49,9 +49,19 @@ response_header_timeout = "120s"
 # referer = "https://example.com"
 # title = "model-proxy"
 
+# Optional defaults injected into every upstream request body for models using
+# this provider. These are body fields, not HTTP headers.
+# [providers.openrouter.extra_body]
+# provider = { zdr = true, data_collection = "deny" }
+
 [models.fast]
 provider = "openrouter"
 upstream = "openai/gpt-4o-mini"
+
+# Model-level extra_body values override provider-level values. Nested objects
+# such as OpenRouter's "provider" object are merged recursively.
+# [models.fast.extra_body]
+# provider = { order = ["openai"], allow_fallbacks = false }
 
 [models.smart]
 provider = "openrouter"

@@ -13,6 +13,7 @@ provider.
 - TOML configuration with strict unknown-field rejection.
 - Virtual keys loaded from environment variables, with optional `.env` support.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
+- Provider-level and model-level extra request-body fields, merged per request.
 - Provider-agnostic interface; the only implementation is OpenRouter.
 - Transparent upstream response bodies and SSE streams.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
@@ -101,9 +102,16 @@ response_header_timeout = "120s"
 # referer = "https://example.com"
 # title = "model-proxy"
 
+# Optional defaults injected into every request body for this provider.
+# [providers.openrouter.extra_body]
+# provider = { zdr = true, data_collection = "deny" }
+
 [models.fast]
 provider = "openrouter"
 upstream = "openai/gpt-4o-mini"
+
+# [models.fast.extra_body]
+# provider = { order = ["openai"], allow_fallbacks = false }
 ```
 
 Rules:
@@ -139,6 +147,38 @@ Requests containing `models`, `route`, or `plugins` are rejected with `400`.
 Those OpenRouter fields can bypass the alias registry or add paid features.
 Other fields, including `provider` and `transforms`, are passed through
 untouched. There are no proxy-level retries or fallbacks.
+
+### Extra request-body fields
+
+`extra_body` injects or overrides request-body fields before the upstream call.
+It may be configured at the provider level (defaults for every model using that
+provider) and at the model level (overrides). Nested JSON objects are merged
+recursively; scalars and arrays from the more specific config replace the base
+value.
+
+```toml
+[providers.openrouter.extra_body]
+provider = { zdr = true, data_collection = "deny" }
+
+[models.fast.extra_body]
+provider = { order = ["openai"], allow_fallbacks = false }
+```
+
+The example above sends this `provider` object for the `fast` alias:
+
+```json
+{"provider":{"zdr":true,"data_collection":"deny","order":["openai"],"allow_fallbacks":false}}
+```
+
+Configured values win over client-supplied values at the same JSON key, while
+unrelated client fields remain intact. For example, a client cannot turn off
+`zdr` or set `data_collection` to `allow` when the config denies it. To enforce
+a completely fixed object, set every key you care about in the config.
+
+These are OpenRouter request-body fields, not HTTP headers; OpenRouter reads
+`provider.zdr` and `provider.data_collection` from the body. `model`,
+`messages`, `stream`, `models`, `route`, and `plugins` may not be set in
+`extra_body`; config load fails if they appear.
 
 ## Behavior
 

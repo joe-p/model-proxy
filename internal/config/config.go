@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log/slog"
 	"time"
 )
@@ -82,10 +83,12 @@ type ProviderConfig struct {
 	ResponseHeaderTimeout time.Duration
 	Referer               string
 	Title                 string
+	ExtraBody             map[string]json.RawMessage
 }
 
 type ModelConfig struct {
-	Alias    string
-	Provider string
-	Upstream string
+	Alias     string
+	Provider  string
+	Upstream  string
+	ExtraBody map[string]json.RawMessage
 }

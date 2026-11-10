@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -381,4 +382,100 @@ upstream = "openai/gpt-4o-mini"
 			}
 		})
 	}
+}
+
+func TestLoadMergesExtraBody(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.toml", `
+[auth]
+enabled = false
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[providers.openrouter.extra_body]
+provider = { zdr = true, data_collection = "deny" }
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+
+[models.fast.extra_body]
+provider = { order = ["openai"] }
+transforms = ["middle-out"]
+
+[models.smart]
+provider = "openrouter"
+upstream = "anthropic/claude-sonnet-4"
+`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	fast := decodeExtraBody(t, cfg.Models["fast"].ExtraBody)
+	provider := fast["provider"].(map[string]any)
+	if provider["zdr"] != true || provider["data_collection"] != "deny" {
+		t.Fatalf("provider defaults missing from fast: %+v", provider)
+	}
+	if got := provider["order"].([]any); len(got) != 1 || got[0] != "openai" {
+		t.Fatalf("model provider override missing: %+v", provider)
+	}
+	if got := fast["transforms"].([]any); len(got) != 1 || got[0] != "middle-out" {
+		t.Fatalf("model transforms missing: %+v", fast)
+	}
+
+	smart := decodeExtraBody(t, cfg.Models["smart"].ExtraBody)
+	smartProvider := smart["provider"].(map[string]any)
+	if smartProvider["zdr"] != true || smartProvider["data_collection"] != "deny" {
+		t.Fatalf("provider defaults missing from smart: %+v", smartProvider)
+	}
+	if _, ok := smartProvider["order"]; ok {
+		t.Fatalf("model override leaked into sibling model: %+v", smartProvider)
+	}
+}
+
+func TestLoadRejectsReservedExtraBodyFields(t *testing.T) {
+	for _, field := range []string{"model", "messages", "stream", "models", "route", "plugins"} {
+		t.Run(field, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeFile(t, dir, "config.toml", `
+[auth]
+enabled = false
+
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_KEY"
+
+[models.fast]
+provider = "openrouter"
+upstream = "openai/gpt-4o-mini"
+
+[models.fast.extra_body]
+`+field+` = true
+`)
+			t.Setenv("OPENROUTER_KEY", "upstream")
+
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), "may not be set") {
+				t.Fatalf("expected reserved field error, got %v", err)
+			}
+		})
+	}
+}
+
+func decodeExtraBody(t *testing.T, value map[string]json.RawMessage) map[string]any {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal extra body: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("decode extra body: %v", err)
+	}
+	return decoded
 }

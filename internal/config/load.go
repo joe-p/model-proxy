@@ -51,17 +51,19 @@ type rawPolicy struct {
 }
 
 type rawProvider struct {
-	BaseURL               string  `toml:"base_url"`
-	APIKeyEnv             string  `toml:"api_key_env"`
-	DialTimeout           *string `toml:"dial_timeout"`
-	ResponseHeaderTimeout *string `toml:"response_header_timeout"`
-	Referer               string  `toml:"referer"`
-	Title                 string  `toml:"title"`
+	BaseURL               string         `toml:"base_url"`
+	APIKeyEnv             string         `toml:"api_key_env"`
+	DialTimeout           *string        `toml:"dial_timeout"`
+	ResponseHeaderTimeout *string        `toml:"response_header_timeout"`
+	Referer               string         `toml:"referer"`
+	Title                 string         `toml:"title"`
+	ExtraBody             map[string]any `toml:"extra_body"`
 }
 
 type rawModel struct {
-	Provider string `toml:"provider"`
-	Upstream string `toml:"upstream"`
+	Provider  string         `toml:"provider"`
+	Upstream  string         `toml:"upstream"`
+	ExtraBody map[string]any `toml:"extra_body"`
 }
 
 // Load reads, resolves, and validates a TOML configuration file. An optional

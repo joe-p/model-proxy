@@ -150,6 +150,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		stream = *streamValue
 	}
 
+	if len(model.ExtraBody) > 0 {
+		fields, err = config.MergeExtraBody(fields, model.ExtraBody)
+		if err != nil {
+			lr.errorDetail = err.Error()
+			writeAPIError(w, lr, errInternal())
+			return
+		}
+	}
+
+	// The alias rewrite always wins, even for hand-built configs that bypass
+	// load-time validation of reserved extra_body fields.
 	upstreamModel, err := json.Marshal(model.Upstream)
 	if err != nil {
 		writeAPIError(w, lr, errInternal())

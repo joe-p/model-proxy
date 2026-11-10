@@ -553,3 +553,72 @@ func TestPoliciesRestrictChatAndModelListing(t *testing.T) {
 		}
 	}
 }
+
+func TestChatAppliesConfiguredExtraBody(t *testing.T) {
+	gotBody := make(chan map[string]json.RawMessage, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+		}
+		gotBody <- fields
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxy(t, upstream.URL, func(cfg *config.Config) {
+		model := cfg.Models["fast"]
+		model.ExtraBody = rawFields(t, `{
+			"provider": {"zdr": true, "data_collection": "deny", "order": ["openai"]},
+			"transforms": ["middle-out"]
+		}`)
+		cfg.Models["fast"] = model
+	})
+
+	resp := postChat(t, proxy.URL, "test-key", `{
+		"model": "fast",
+		"messages": [{"role": "user", "content": "hi"}],
+		"provider": {"zdr": false, "allow_fallbacks": false}
+	}`)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	fields := <-gotBody
+	var model string
+	if err := json.Unmarshal(fields["model"], &model); err != nil || model != "openai/gpt-4o-mini" {
+		t.Fatalf("upstream model = %q, err = %v", model, err)
+	}
+
+	var provider map[string]any
+	if err := json.Unmarshal(fields["provider"], &provider); err != nil {
+		t.Fatalf("decode provider: %v", err)
+	}
+	if provider["zdr"] != true || provider["data_collection"] != "deny" {
+		t.Fatalf("configured provider fields not enforced: %+v", provider)
+	}
+	if got := provider["order"].([]any); len(got) != 1 || got[0] != "openai" {
+		t.Fatalf("configured provider order missing: %+v", provider)
+	}
+	if provider["allow_fallbacks"] != false {
+		t.Fatalf("client provider fields should be preserved: %+v", provider)
+	}
+
+	var transforms []string
+	if err := json.Unmarshal(fields["transforms"], &transforms); err != nil || len(transforms) != 1 || transforms[0] != "middle-out" {
+		t.Fatalf("configured transforms missing: %v, err = %v", transforms, err)
+	}
+}
+
+func rawFields(t *testing.T, value string) map[string]json.RawMessage {
+	t.Helper()
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(value), &fields); err != nil {
+		t.Fatalf("decode raw fields: %v", err)
+	}
+	return fields
+}
