@@ -1468,6 +1468,47 @@ func TestModelsOpenRouterShapeUsesCatalogMetadata(t *testing.T) {
 	}
 }
 
+func TestModelsOmitPricingForSubscriptionBilling(t *testing.T) {
+	proxy, _ := newTestProxyWithPricing(t, "http://127.0.0.1:1", "openrouter", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["openrouter"]
+		providerCfg.PricingProvider = "openai"
+		providerCfg.BillingMode = "subscription"
+		cfg.Providers["openrouter"] = providerCfg
+
+		// Explicit model pricing is also a list price and must not be advertised.
+		fast := cfg.Models["fast"]
+		fast.Pricing = &config.ModelPricing{InputPerMillion: 2, OutputPerMillion: 10}
+		cfg.Models["fast"] = fast
+	}, solCatalog())
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data []map[string]json.RawMessage `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if len(payload.Data) != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	for _, model := range payload.Data {
+		if raw, exists := model["pricing"]; exists {
+			t.Fatalf("subscription model %s advertised pricing: %s", model["id"], raw)
+		}
+		// Metadata the catalog does know still describes the model.
+		if raw, exists := model["context_length"]; !exists || string(raw) != "1050000" {
+			t.Fatalf("missing catalog metadata on %s: context_length=%s", model["id"], raw)
+		}
+	}
+}
+
 func flatCatalog() fakeCatalog {
 	return fakeCatalog{
 		known: true,

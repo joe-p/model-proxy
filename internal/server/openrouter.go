@@ -204,8 +204,13 @@ func openRouterModelList(st *state, entries []modelEntry, created int64) map[str
 			DefaultParameters:   map[string]any{},
 		}
 
-		if pricingBody := openRouterPricingFor(entry.Pricing, info, known); pricingBody != nil {
-			model.Pricing = pricingBody
+		// A subscription provider bills per plan, not per token, so its models
+		// have no list price to advertise. Catalog rates are still used for the
+		// access log's API-equivalent estimate.
+		if providerCfg.BillingMode != "subscription" {
+			if pricingBody := openRouterPricingFor(entry.Pricing, info, known); pricingBody != nil {
+				model.Pricing = pricingBody
+			}
 		}
 		data = append(data, model)
 	}

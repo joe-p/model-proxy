@@ -516,7 +516,10 @@ Model metadata for the listing comes from the pricing catalog, keyed by the
 provider's `pricing_provider` and the model's `upstream` id. Explicit model
 `pricing` in the config wins over the catalog. Models the catalog does not know
 are listed without `pricing` and with a minimal architecture rather than
-invented numbers. `supported_parameters` is conservative: it reports `tools`
+invented numbers. Providers with `billing_mode: "subscription"` are listed
+without `pricing` for every model, including explicit model pricing, because a
+plan has no per-token list price; catalog rates still feed access-log estimates.
+`supported_parameters` is conservative: it reports `tools`
 and reasoning parameters only when the catalog confirms them, and omits
 `temperature`/`top_p`/`seed` for Codex-style backends that reject them.
 
