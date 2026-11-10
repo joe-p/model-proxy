@@ -11,8 +11,8 @@ import (
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/logging"
 	"github.com/joe-p/model-proxy/internal/provider"
+	"github.com/joe-p/model-proxy/internal/provider/openai"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
-	"github.com/joe-p/model-proxy/internal/provider/privateaigateway"
 	"github.com/joe-p/model-proxy/internal/server"
 )
 
@@ -131,8 +131,8 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				return nil, fmt.Errorf("provider %q: %w", name, err)
 			}
 			result[name] = p
-		case "private-ai-gateway", "phala":
-			p, err := privateaigateway.New(
+		case "openai-compatible", "openai", "private-ai-gateway", "phala":
+			p, err := openai.New(
 				providerCfg.Name,
 				providerCfg.BaseURL,
 				providerCfg.APIKey,

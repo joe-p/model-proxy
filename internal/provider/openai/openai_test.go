@@ -1,4 +1,4 @@
-package privateaigateway_test
+package openai_test
 
 import (
 	"context"
@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/joe-p/model-proxy/internal/provider"
-	"github.com/joe-p/model-proxy/internal/provider/privateaigateway"
+	"github.com/joe-p/model-proxy/internal/provider/openai"
 )
 
-func TestChatCompletionsUsesGatewayEndpointAndHeaders(t *testing.T) {
+func TestChatCompletionsUsesOpenAIEndpointAndHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("method = %s", r.Method)
@@ -53,7 +53,7 @@ func TestChatCompletionsUsesGatewayEndpointAndHeaders(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := privateaigateway.New(
+	p, err := openai.New(
 		"phala",
 		upstream.URL+"/v1",
 		"phala-key",
@@ -94,7 +94,7 @@ func TestChatCompletionsDefaultsAcceptForStreaming(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := privateaigateway.New("phala", upstream.URL+"/v1", "key", time.Second, time.Second)
+	p, err := openai.New("phala", upstream.URL+"/v1", "key", time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

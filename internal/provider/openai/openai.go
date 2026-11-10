@@ -1,6 +1,6 @@
-// Package privateaigateway implements the OpenAI-compatible transport for
-// Private AI Gateway (https://github.com/Dstack-TEE/private-ai-gateway).
-package privateaigateway
+// Package openai implements the generic OpenAI-compatible chat completions
+// transport. Providers such as Private AI Gateway use this transport directly.
+package openai
 
 import (
 	"time"
@@ -8,9 +8,7 @@ import (
 	"github.com/joe-p/model-proxy/internal/provider/openaicompat"
 )
 
-// Provider is an OpenAI-compatible transport preconfigured for Private AI
-// Gateway. The gateway's ACI request constraints, such as
-// {"provider":{"aci_verified":true}}, are supplied through extra_body.
+// Provider is an OpenAI-compatible chat completions provider.
 type Provider = openaicompat.Provider
 
 func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.Duration) (*Provider, error) {

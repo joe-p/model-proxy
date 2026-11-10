@@ -15,8 +15,8 @@ import (
 
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/provider"
+	"github.com/joe-p/model-proxy/internal/provider/openai"
 	"github.com/joe-p/model-proxy/internal/provider/openrouter"
-	"github.com/joe-p/model-proxy/internal/provider/privateaigateway"
 	"github.com/joe-p/model-proxy/internal/server"
 )
 
@@ -96,8 +96,8 @@ func newTestProxyWithProvider(t *testing.T, upstreamURL, providerType string, tw
 			providerCfg.Referer,
 			providerCfg.Title,
 		)
-	case "private-ai-gateway":
-		p, err = privateaigateway.New(
+	case "openai-compatible":
+		p, err = openai.New(
 			providerCfg.Name,
 			providerCfg.BaseURL,
 			providerCfg.APIKey,
@@ -462,7 +462,7 @@ func TestPrivateAIGatewayNormalizesUsageToOpenRouter(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "private-ai-gateway", nil)
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", nil)
 	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":false}`)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -535,7 +535,7 @@ func TestPrivateAIGatewayRequestsAndNormalizesStreamingUsage(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "private-ai-gateway", nil)
+	proxy, logs := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", nil)
 	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[],"stream":true,"stream_options":{"include_usage":false}}`)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)

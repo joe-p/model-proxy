@@ -114,7 +114,7 @@ func TestLoadResolvesProviderTypes(t *testing.T) {
       "api_key_env": "OPENROUTER_KEY"
     },
     "phala": {
-      "type": "private-ai-gateway",
+      "type": "openai-compatible",
       "base_url": "https://inference.phala.com/v1",
       "api_key_env": "PHALA_KEY"
     }
@@ -135,7 +135,7 @@ func TestLoadResolvesProviderTypes(t *testing.T) {
 	if got := cfg.Providers["openrouter"].Type; got != "openrouter" {
 		t.Fatalf("default provider type = %q, want name", got)
 	}
-	if got := cfg.Providers["phala"].Type; got != "private-ai-gateway" {
+	if got := cfg.Providers["phala"].Type; got != "openai-compatible" {
 		t.Fatalf("explicit provider type = %q", got)
 	}
 }

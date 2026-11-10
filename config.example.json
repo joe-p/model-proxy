@@ -63,7 +63,8 @@
 
   // Provider keys are local names. "type" selects the implementation and may
   // be omitted when it matches the provider name. Supported types are
-  // "openrouter", "private-ai-gateway", and its "phala" alias.
+  // "openrouter" and "openai-compatible" (aliases: "openai", "phala",
+  // "private-ai-gateway").
   "providers": {
     "openrouter": {
       "type": "openrouter",
@@ -86,7 +87,7 @@
       }
     },
     "phala": {
-      "type": "private-ai-gateway",
+      "type": "openai-compatible",
       "base_url": "http://localhost:4180/v1",
       "api_key_env": "PHALA_API_KEY",
       "dial_timeout": "10s",

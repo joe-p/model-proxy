@@ -1,6 +1,7 @@
 # model-proxy
 
-A small, configuration-driven, OpenAI-compatible proxy for OpenRouter and
+A small, configuration-driven, OpenAI-compatible proxy for OpenRouter and any
+OpenAI-compatible upstream, including
 [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway). It is
 deliberately not LiteLLM: no UI, database, caching, rate limiting, budgets, or
 multi-provider translation layer. One Go binary, one JSON file, and routes to
@@ -17,8 +18,8 @@ one or more upstream providers.
 - Optional per-key access-log `user_agent` overrides.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
-- Provider-agnostic interface with OpenRouter and Private AI Gateway
-  implementations.
+- Provider-agnostic interface with an OpenRouter implementation and a generic
+  OpenAI-compatible implementation.
 - Transparent upstream response bodies and SSE streams.
 - OpenAI-shaped errors for proxy-generated failures; upstream errors pass through.
 - OpenRouter-compatible usage normalization for non-OpenRouter providers.
@@ -141,7 +142,8 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
 
   // Provider keys are local names. "type" selects the implementation and may
   // be omitted when it matches the provider name. Supported types are
-  // "openrouter", "private-ai-gateway", and its "phala" alias.
+  // "openrouter" and "openai-compatible" (aliases: "openai", "phala",
+  // "private-ai-gateway").
   "providers": {
     "openrouter": {
       "type": "openrouter",
@@ -164,7 +166,7 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
       },
     },
     "phala": {
-      "type": "private-ai-gateway",
+      "type": "openai-compatible",
       "base_url": "https://inference.phala.com/v1",
       "api_key_env": "PHALA_API_KEY",
       "dial_timeout": "10s",
@@ -239,11 +241,14 @@ used. Supported types are:
 
 - `openrouter`: OpenAI-compatible transport with optional `referer` and `title`
   attribution headers.
-- `private-ai-gateway` (alias `phala`): OpenAI-compatible transport for
-  [Private AI Gateway](https://github.com/Dstack-TEE/private-ai-gateway). The
-  Phala-hosted deployment is available at `https://inference.phala.com/v1`. A
-  provider named `phala` or `private-ai-gateway` without a `type` uses this
-  implementation.
+- `openai-compatible`: generic transport for any OpenAI-compatible Chat
+  Completions API, including Private AI Gateway, vLLM, and similar servers.
+  `openai`, `phala`, and `private-ai-gateway` are accepted aliases for this
+  type.
+
+Private AI Gateway is not a separate implementation. Configure it as an
+`openai-compatible` provider. The Phala-hosted deployment is available at
+`https://inference.phala.com/v1`.
 
 `base_url` is the provider's API root and must include its version prefix. The
 proxy appends `/chat/completions`, so `https://inference.phala.com/v1` becomes
