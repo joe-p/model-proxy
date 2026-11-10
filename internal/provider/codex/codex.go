@@ -5,6 +5,7 @@ package codex
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,6 +34,11 @@ type Provider struct {
 // clientVersion is required by the Codex model listing endpoint. When empty,
 // the provider still serves chat and responses; only model discovery fails.
 func New(name, baseURL, apiKey, authDir, clientVersion string, dialTimeout, responseHeaderTimeout time.Duration) (*Provider, error) {
+	usageURL, err := usageEndpoint(baseURL)
+	if err != nil {
+		return nil, err
+	}
+
 	headers := map[string]string{
 		"originator":  DefaultOriginator,
 		"OpenAI-Beta": "responses=experimental",
@@ -45,6 +51,7 @@ func New(name, baseURL, apiKey, authDir, clientVersion string, dialTimeout, resp
 		ResponseHeaderTimeout: responseHeaderTimeout,
 		Headers:               headers,
 		ModelsQuery:           modelsQuery(clientVersion),
+		UsageURL:              usageURL,
 	}
 	if apiKey == "" {
 		opts.TokenSource = codexauth.New(codexauth.Options{Dir: authDir})
@@ -73,6 +80,36 @@ func (p *Provider) Responses(ctx context.Context, req provider.Request) (*http.R
 
 func (p *Provider) Models(ctx context.Context) ([]string, error) {
 	return p.upstream.Models(ctx)
+}
+
+// Usage fetches ChatGPT subscription usage from the Codex backend. The raw
+// response is returned so clients can consume the same payload as the Codex
+// CLI's /backend-api/wham/usage endpoint.
+func (p *Provider) Usage(ctx context.Context) (*http.Response, error) {
+	return p.upstream.Usage(ctx)
+}
+
+// usageEndpoint derives ChatGPT's wham/usage URL from the configured Codex
+// base URL. The Codex backend base URL is typically
+// https://chatgpt.com/backend-api/codex, so the usage endpoint lives at the
+// same /backend-api prefix.
+func usageEndpoint(baseURL string) (string, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return "", fmt.Errorf("parse Codex base URL: %w", err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("Codex base URL must include a scheme and host")
+	}
+
+	prefix := ""
+	if i := strings.Index(u.Path, "/backend-api"); i >= 0 {
+		prefix = u.Path[:i]
+	}
+	u.Path = prefix + "/backend-api/wham/usage"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 // modelsQuery builds the client_version parameter the Codex model listing

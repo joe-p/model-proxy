@@ -2,7 +2,9 @@ package server_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1700,6 +1702,156 @@ func TestCORSPreflightAndHeaders(t *testing.T) {
 	resp.Body.Close()
 	if got := resp.Header.Get("Access-Control-Expose-Headers"); !strings.Contains(got, "X-Model-Proxy-Alias") {
 		t.Fatalf("expose-headers = %q", got)
+	}
+}
+
+type fakeUsageProvider struct {
+	name string
+	body string
+}
+
+func (p *fakeUsageProvider) Name() string { return p.name }
+
+func (p *fakeUsageProvider) ChatCompletions(context.Context, provider.Request) (*http.Response, error) {
+	return nil, errors.New("unused")
+}
+
+func (p *fakeUsageProvider) Responses(context.Context, provider.Request) (*http.Response, error) {
+	return nil, errors.New("unused")
+}
+
+func (p *fakeUsageProvider) Usage(context.Context) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(p.body)),
+	}, nil
+}
+
+func newUsageTestProxy(t *testing.T, providers map[string]config.ProviderConfig, impls map[string]provider.Provider) *httptest.Server {
+	t.Helper()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			Listen:            "127.0.0.1:0",
+			MaxBodyBytes:      1 << 20,
+			ReadHeaderTimeout: time.Second,
+			ShutdownTimeout:   time.Second,
+		},
+		Logging:   config.LoggingConfig{Format: "json", Level: slog.LevelDebug, LogUsage: true},
+		Auth:      config.AuthConfig{Enabled: true},
+		Keys:      []config.VirtualKey{{Name: "test", Key: "test-key"}},
+		Providers: providers,
+		Models:    map[string]config.ModelConfig{},
+	}
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	ts := httptest.NewServer(server.New(cfg, impls, logger, nil))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+func usageGet(t *testing.T, url, key string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET usage: %v", err)
+	}
+	return resp
+}
+
+func TestUsageRequiresAuthAndPassesThroughPayload(t *testing.T) {
+	const payload = `{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":42}}}`
+	providers := map[string]config.ProviderConfig{
+		"codex": {Name: "codex", Type: "codex", BillingMode: "subscription"},
+	}
+	impls := map[string]provider.Provider{"codex": &fakeUsageProvider{name: "codex", body: payload}}
+	proxy := newUsageTestProxy(t, providers, impls)
+
+	resp := usageGet(t, proxy.URL+"/backend-api/wham/usage", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status without key = %d, want 401", resp.StatusCode)
+	}
+
+	resp = usageGet(t, proxy.URL+"/backend-api/wham/usage", "test-key")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != payload {
+		t.Fatalf("body = %s", body)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q", got)
+	}
+}
+
+func TestUsageSelectsCodexProvider(t *testing.T) {
+	providers := map[string]config.ProviderConfig{
+		"codex-a": {Name: "codex-a", Type: "codex"},
+		"codex-b": {Name: "codex-b", Type: "codex"},
+	}
+	impls := map[string]provider.Provider{
+		"codex-a": &fakeUsageProvider{name: "codex-a", body: `{"account":"a"}`},
+		"codex-b": &fakeUsageProvider{name: "codex-b", body: `{"account":"b"}`},
+	}
+	proxy := newUsageTestProxy(t, providers, impls)
+
+	resp := usageGet(t, proxy.URL+"/backend-api/wham/usage", "test-key")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("ambiguous status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = usageGet(t, proxy.URL+"/backend-api/wham/usage?provider=codex-b", "test-key")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("selected status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != `{"account":"b"}` {
+		t.Fatalf("body = %s", body)
+	}
+
+	resp = usageGet(t, proxy.URL+"/backend-api/wham/usage?provider=missing", "test-key")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown provider status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestUsageRejectsNonGet(t *testing.T) {
+	providers := map[string]config.ProviderConfig{
+		"codex": {Name: "codex", Type: "codex"},
+	}
+	impls := map[string]provider.Provider{"codex": &fakeUsageProvider{name: "codex", body: `{}`}}
+	proxy := newUsageTestProxy(t, providers, impls)
+
+	req, _ := http.NewRequest(http.MethodPost, proxy.URL+"/backend-api/wham/usage", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST usage: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Allow"); got != http.MethodGet {
+		t.Fatalf("allow = %q", got)
 	}
 }
 

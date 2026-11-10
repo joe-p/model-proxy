@@ -124,6 +124,9 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 		s.mux.HandleFunc(prefix+"/responses", s.handleResponses)
 		s.mux.HandleFunc(prefix+"/models", s.handleModels)
 	}
+	// Codex clients and usage extensions expect ChatGPT's usage path. The
+	// handler forwards it to the configured Codex provider.
+	s.mux.HandleFunc("/backend-api/wham/usage", s.handleUsage)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/", s.handleNotFound)
 

@@ -64,6 +64,10 @@ type Options struct {
 	// such as Codex's required client_version parameter.
 	ModelsQuery string
 
+	// UsageURL is an absolute URL for subscription usage queries. It is
+	// optional and only used by providers that expose a usage endpoint.
+	UsageURL string
+
 	// Headers are additional request headers, such as OpenRouter's
 	// attribution headers. They are set after the standard headers.
 	Headers map[string]string
@@ -76,6 +80,7 @@ type Provider struct {
 	responsesPath string
 	modelsPath    string
 	modelsQuery   string
+	usageURL      string
 	apiKey        string
 	tokenSource   TokenSource
 	headers       http.Header
@@ -127,6 +132,7 @@ func New(opts Options) (*Provider, error) {
 		responsesPath: responsesPath,
 		modelsPath:    modelsPath,
 		modelsQuery:   strings.TrimPrefix(strings.TrimSpace(opts.ModelsQuery), "?"),
+		usageURL:      strings.TrimSpace(opts.UsageURL),
 		apiKey:        opts.APIKey,
 		tokenSource:   opts.TokenSource,
 		headers:       headers,
@@ -159,6 +165,37 @@ func (p *Provider) ChatCompletions(ctx context.Context, req provider.Request) (*
 
 func (p *Provider) Responses(ctx context.Context, req provider.Request) (*http.Response, error) {
 	return p.do(ctx, p.responsesPath, req)
+}
+
+// Usage fetches subscription usage from the configured usage URL. The upstream
+// response is returned unmodified; the server decides how to expose it.
+func (p *Provider) Usage(ctx context.Context) (*http.Response, error) {
+	if p.usageURL == "" {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: errors.New("usage endpoint is not configured")}
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, p.usageURL, nil)
+	if err != nil {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	if err := p.authorize(ctx, httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		kind := provider.Unavailable
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() || errors.Is(err, context.DeadlineExceeded) {
+			kind = provider.Timeout
+		}
+		return nil, &provider.Error{Kind: kind, Err: err}
+	}
+	return resp, nil
 }
 
 func (p *Provider) do(ctx context.Context, path string, req provider.Request) (*http.Response, error) {

@@ -15,6 +15,8 @@ one or more upstream providers.
   aliases for clients that hardcode OpenRouter's base URL.
 - `POST /v1/responses` for Responses-native clients such as Codex, streaming
   and non-streaming, with transparent response passthrough.
+- `GET /backend-api/wham/usage` for Codex subscription usage, forwarded through
+  the configured `codex` provider and returned unchanged.
 - `GET /v1/models` backed by a strict alias registry, optionally merged with
   models discovered from providers that allow passthrough.
 - OpenRouter-compatible by default: OpenRouter-shaped model listings, usage
@@ -366,6 +368,28 @@ A `codex` provider defaults to `"billing_mode": "subscription"`. Override it
 with `billing_mode` if the same provider shape points at an API-billed service.
 With a pricing catalog configured, `estimated_api_cost_usd` gives the
 API-equivalent list price for the same tokens; it is not a subscription charge.
+
+### Codex usage
+
+`GET /backend-api/wham/usage` forwards ChatGPT's subscription usage payload
+through the configured `codex` provider, including token refresh and the
+`ChatGPT-Account-Id` header. The upstream JSON is returned unchanged, so clients
+written against ChatGPT's usage endpoint (such as `pi-openai-usage`) can point at
+the proxy instead.
+
+The endpoint uses model-proxy's normal virtual-key authentication; the caller's
+`Authorization` header is the proxy key, not a ChatGPT token. When exactly one
+`codex` provider is configured it is selected automatically. With several Codex
+providers, pass `?provider=<name>`:
+
+```sh
+curl http://127.0.0.1:8080/backend-api/wham/usage?provider=codex \
+  -H "Authorization: Bearer $PROXY_KEY_LAPTOP"
+```
+
+The upstream usage URL is derived from the provider's `base_url`; for a typical
+`https://chatgpt.com/backend-api/codex` base URL, the upstream endpoint is
+`https://chatgpt.com/backend-api/wham/usage`.
 
 ### Model aliases
 

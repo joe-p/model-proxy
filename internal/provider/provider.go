@@ -31,6 +31,12 @@ type ModelLister interface {
 	Models(ctx context.Context) ([]string, error)
 }
 
+// UsageProvider is implemented by providers that expose subscription usage
+// information. The server uses it for the Codex usage passthrough endpoint.
+type UsageProvider interface {
+	Usage(ctx context.Context) (*http.Response, error)
+}
+
 type ErrorKind int
 
 const (

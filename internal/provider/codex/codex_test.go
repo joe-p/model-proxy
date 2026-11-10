@@ -181,6 +181,48 @@ func TestProviderResponsesUsesCodexResponsesPath(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestProviderUsageProxiesWhamUsage(t *testing.T) {
+	dir := t.TempDir()
+	accessToken := makeJWT(t, time.Now().Add(time.Hour), "account-123")
+	writeAuthFile(t, dir, accessToken)
+
+	const payload = `{"plan_type":"plus","rate_limit":{"primary_window":{"used_percent":42}}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/backend-api/wham/usage" {
+			t.Errorf("path = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+accessToken {
+			t.Errorf("authorization = %q", got)
+		}
+		if got := r.Header.Get("ChatGPT-Account-Id"); got != "account-from-token" {
+			t.Errorf("account header = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(payload))
+	}))
+	defer upstream.Close()
+
+	p, err := codex.New("codex", upstream.URL+"/backend-api/codex", "", dir, "", time.Second, time.Second)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp, err := p.Usage(context.Background())
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != payload {
+		t.Errorf("body = %s", body)
+	}
+}
+
 func TestProviderStaticAPIKeyTakesPrecedence(t *testing.T) {
 	staticKey := makeJWT(t, time.Now().Add(time.Hour), "static-account")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
