@@ -53,6 +53,31 @@ In separate Docker services, bind the dashboard to the network interface
 Open <http://127.0.0.1:8787>. Do not open `public/index.html` directly: the page
 needs the collector's `/api/usage` endpoint.
 
+### Docker
+
+Build the image from this directory:
+
+```sh
+cd examples/dashboard
+docker build -t model-proxy-dashboard .
+```
+
+Run it with a named volume for the SQLite database:
+
+```sh
+docker run -d --name dashboard \
+  -p 127.0.0.1:8787:8787 \
+  -v dashboard-data:/data \
+  model-proxy-dashboard
+```
+
+The image binds to `0.0.0.0` inside the container (the default `127.0.0.1`
+would be unreachable from outside), stores the database at `/data/usage.db`,
+and runs as the unprivileged `node` user. `docker run ... model-proxy-dashboard
+--help` shows the collector options, which can be appended after the image name.
+Ingest is unauthenticated: publish the port on localhost or a trusted network,
+or put a reverse proxy with authentication in front of it.
+
 ### Offline and development modes
 
 Wrap a live proxy (the collector spawns it and reads its stdout):

@@ -1,0 +1,8 @@
+node_modules/
+*.db
+*.db-shm
+*.db-wal
+sample.log
+README.md
+Dockerfile
+.dockerignore
