@@ -950,9 +950,10 @@ all.
 `billing_mode` is configured per provider. It defaults to `subscription` for
 `codex` providers and is omitted otherwise. It tells a log consumer that token
 usage did not incur per-token dollar cost, so a missing `cost_usd` is expected.
-Requests through `/claude_sub/` are always logged with `provider: claude_sub`,
-`billing_mode: subscription`, `passthrough` true, and the requested model id in
-`upstream_model`.
+Requests through `/claude_sub/` are always logged with `provider: anthropic`
+(the same namespace used for pricing), `billing_mode: subscription`,
+`passthrough` true, and the requested model id in `upstream_model`. The
+`/claude_sub` path is still visible in the `path` field.
 
 When the upstream does not report `usage.cost` and pricing is available, the log
 also includes `estimated_api_cost_usd` and `pricing_source`. This is a
@@ -1023,7 +1024,7 @@ other request, with `path` set to `/admin/reload`.
 | `policy_mode` | string | when the key has a policy | `whitelist` or `blacklist`. |
 | `policy_models` | string[] | when the key has a policy | Policy's model list. |
 | `alias` | string | when resolved | Requested model id (alias or passthrough id). |
-| `provider` | string | when resolved | Configured provider name. |
+| `provider` | string | when resolved | Configured provider name; `/claude_sub/` requests log `anthropic`. |
 | `billing_mode` | string | when set | For example `subscription`; see below. |
 | `upstream_model` | string | when resolved | Model id sent upstream. |
 | `passthrough` | bool | when true | Request used a passthrough route. |

@@ -70,7 +70,9 @@ func (s *Server) handleClaudeSub(w http.ResponseWriter, r *http.Request) {
 		path = "/"
 	}
 
-	lr.provider = "claude_sub"
+	// Claude subscription traffic is tagged with the anthropic provider so
+	// access logs, dashboards, and pricing all share one namespace.
+	lr.provider = "anthropic"
 	lr.billingMode = "subscription"
 	lr.upstream = model
 	lr.passthrough = model != ""

@@ -142,7 +142,7 @@ func TestClaudeSubForwardsTransparentlyAndLogsUsage(t *testing.T) {
 	}
 
 	waitForLog(t, logs, `"key_name":"test"`)
-	waitForLog(t, logs, `"provider":"claude_sub"`)
+	waitForLog(t, logs, `"provider":"anthropic"`)
 	waitForLog(t, logs, `"billing_mode":"subscription"`)
 	waitForLog(t, logs, `"upstream_model":"claude-sonnet-4-5-20250929"`)
 	waitForLog(t, logs, `"passthrough":true`)
