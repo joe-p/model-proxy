@@ -13,11 +13,11 @@ import (
 
 type rawConfig struct {
 	EnvFile                  string                 `json:"env_file"`
+	KeyFile                  string                 `json:"key_file"`
 	Server                   rawServer              `json:"server"`
 	Logging                  rawLogging             `json:"logging"`
 	Auth                     *rawAuth               `json:"auth"`
 	Pricing                  *rawPricing            `json:"pricing"`
-	VirtualKeys              []rawVirtualKey        `json:"virtual_keys"`
 	Policies                 []rawPolicy            `json:"policies"`
 	Providers                map[string]rawProvider `json:"providers"`
 	Models                   map[string]rawModel    `json:"models"`
@@ -58,13 +58,6 @@ type rawPricing struct {
 	Cache           *string `json:"cache"`
 	RefreshInterval *string `json:"refresh_interval"`
 	Timeout         *string `json:"timeout"`
-}
-
-type rawVirtualKey struct {
-	Name      string `json:"name"`
-	KeyEnv    string `json:"key_env"`
-	Policy    string `json:"policy"`
-	UserAgent string `json:"user_agent"`
 }
 
 type rawPolicy struct {

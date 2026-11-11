@@ -1,0 +1,35 @@
+// model-proxy virtual keys.
+//
+// Copy this file to keys.json and keep keys.json out of source control:
+//
+//   cp keys.example.json keys.json
+//   chmod 600 keys.json
+//
+// This file is JWCC (JSON with comments and trailing commas), like the main
+// configuration, and contains an array of key objects. Each entry must set
+// exactly one of:
+//
+//   "key": "plaintext-secret"  A literal virtual key. Safe to use here because
+//                              this file is expected to be git ignored.
+//   "key_env": "ENV_VAR"       An environment variable, resolved from the
+//                              process environment first, then env_file.
+//
+// Relative key_file paths in config.json are resolved from config.json.
+[
+  {
+    "name": "laptop",
+    "key": "replace-with-a-long-random-value",
+    "policy": "basic"
+  },
+  {
+    "name": "ci",
+    "key_env": "PROXY_KEY_CI",
+    "policy": "no-smart",
+    // Optional access-log User-Agent override for requests using this key.
+    "user_agent": "Open WebUI"
+  },
+  {
+    "name": "admin",
+    "key": "replace-with-another-long-random-value"
+  }
+]

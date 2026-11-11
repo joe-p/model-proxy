@@ -27,7 +27,8 @@ proxying at `/claude_sub/`.
 - `GET /healthz` liveness endpoint.
 - JWCC configuration (JSON with comments and trailing commas) with strict
   unknown-field rejection.
-- Virtual keys loaded from environment variables, with optional `.env` support.
+- Virtual keys loaded from a separate `key_file`, with direct `key` values for
+  git-ignored files or `key_env` environment lookups.
 - Optional per-key access-log `user_agent` overrides.
 - Named model policies (whitelist or blacklist) attached to virtual keys.
 - Provider-level and model-level extra request-body fields, merged per request.
@@ -49,9 +50,10 @@ proxying at `/claude_sub/`.
 
 ```sh
 cp config.example.json config.json
+cp keys.example.json keys.json
 cp .env.example .env
-chmod 600 .env
-# edit config.json and .env
+chmod 600 keys.json .env
+# edit config.json, keys.json, and .env
 
 make build
 ./bin/model-proxy -config ./config.json
@@ -89,21 +91,28 @@ curl http://127.0.0.1:8080/v1/models \
 
 ## Configuration
 
-See [`config.example.json`](./config.example.json) for a complete example. The
-config is JWCC (JSON with Commas and Comments): `//` line comments, `/* */`
-block comments, and trailing commas are accepted. The example shows both policy
-modes, a key without a policy, provider/model `extra_body`, optional OpenRouter
+See [`config.example.json`](./config.example.json) and
+[`keys.example.json`](./keys.example.json) for complete examples. The config is
+JWCC (JSON with Commas and Comments): `//` line comments, `/* */` block
+comments, and trailing commas are accepted. The example shows both policy modes,
+a key without a policy, provider/model `extra_body`, optional OpenRouter
 attribution headers, and a Private AI Gateway provider with ACI constraints.
 
 ```jsonc
 // model-proxy configuration.
 //
 // This is JWCC (JSON with comments and trailing commas). Unknown fields are
-// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are never
-// placed directly in this file; key_env names are resolved from the process
-// environment first, then from env_file.
+// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are not
+// placed directly in this file. Virtual keys live in a separate key_file that
+// may contain plaintext keys and should be git ignored; provider credentials
+// use api_key_env, resolved from the process environment first, then env_file.
 {
   "env_file": ".env", // Optional; relative paths are resolved from this file.
+
+  // Virtual keys live in a separate array file so it can be git ignored.
+  // Relative paths are resolved from this file. Each entry sets exactly one
+  // of "key" or "key_env".
+  "key_file": "keys.json",
 
   "server": {
     "listen": "127.0.0.1:8080",
@@ -151,24 +160,6 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
 
   // A virtual key's "policy" is optional. Keys without a policy may use every
   // configured model alias.
-  "virtual_keys": [
-    {
-      "name": "laptop",
-      "key_env": "PROXY_KEY_LAPTOP",
-      "policy": "basic",
-    },
-    {
-      "name": "ci",
-      "key_env": "PROXY_KEY_CI",
-      "policy": "no-smart",
-      // Optional access-log User-Agent override for requests using this key.
-      "user_agent": "Open WebUI",
-    },
-    {
-      "name": "admin",
-      "key_env": "PROXY_KEY_ADMIN",
-    },
-  ],
 
   // Policies restrict which model aliases a virtual key may use. "mode" is
   // "whitelist" (only listed aliases) or "blacklist" (all but listed aliases).
@@ -272,12 +263,28 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
 }
 ```
 
+The separate key file is JWCC too and contains an array of key objects:
+
+```jsonc
+// keys.json - keep this file out of source control.
+[
+  {"name": "laptop", "key": "a-long-random-value", "policy": "basic"},
+  {"name": "ci", "key_env": "PROXY_KEY_CI", "policy": "no-smart"},
+  {"name": "admin", "key": "another-long-random-value"},
+]
+```
+
 Rules:
 
 - All durations are Go duration strings such as `"10s"` or `"2m"`.
 - `env_file` is optional and relative to the config file when not absolute.
+- `key_file` is optional and relative to the config file when not absolute.
+  It accepts the same JWCC syntax and strict unknown-field rejection as the
+  main configuration.
 - Process environment variables take precedence over `.env` values.
-- Virtual keys use `key_env` only; plaintext `key` fields are rejected.
+- Key file entries must set exactly one of `key` or `key_env`. A direct `key`
+  is used as a literal virtual key; use it only in a key file that is kept out
+  of version control.
 - `auth.enabled` defaults to `true`. If auth is enabled, at least one virtual
   key must resolve to a non-empty value.
 - A virtual key's `policy` is optional. Keys without a policy may use every
@@ -288,10 +295,11 @@ Rules:
 - Policies require a non-empty `name`, a `mode` of `whitelist` or `blacklist`,
   and a non-empty `models` list of configured aliases. Policy names must be
   unique, and every key `policy` reference must exist.
-- Unknown configuration fields, duplicate virtual key names, duplicate resolved key
-  values, missing environment variables, invalid URLs, and zero models fail
-  startup. Zero models are allowed when `enable_claude_subscription` is true,
-  because `/claude_sub/` forwards model ids without an alias registry.
+- Unknown configuration fields, duplicate virtual key names, duplicate resolved
+  key values, missing or unreadable key files, missing environment variables,
+  invalid URLs, and zero models fail startup. Zero models are allowed when
+  `enable_claude_subscription` is true, because `/claude_sub/` forwards model
+  ids without an alias registry.
 - `server.listen`, `server.read_header_timeout`, `server.admin_listen`, and
   `server.admin_token_env` changes require a restart; other values can be
   reloaded through `POST /admin/reload`.
@@ -979,15 +987,15 @@ curl -fsS -X POST \
 {"status":"ok","changed":true,"config_hash":"9c1f...","models":3,"providers":2,"keys":4,"policies":1,"access_sink":false,"generation":1}
 ```
 
-A reload re-reads the JSON file and its `.env`, validates everything, rebuilds
-providers, and atomically swaps the config. In-flight requests keep the config
-snapshot they started with. Failures are reported inline and leave the running
-configuration untouched:
+A reload re-reads the JSON file, its `key_file`, and its `.env`, validates
+everything, rebuilds providers, and atomically swaps the config. In-flight
+requests keep the config snapshot they started with. Failures are reported
+inline and leave the running configuration untouched:
 
 | Status | Meaning |
 | --- | --- |
-| `200` | Applied, or `"changed": false` when the file is byte-identical to the last applied version. |
-| `400` | The request carried a body. The endpoint only ever re-reads the configured file. |
+| `200` | Applied, or `"changed": false` when the config and key file are byte-identical to the last applied versions. |
+| `400` | The request carried a body. The endpoint only ever re-reads the configured files. |
 | `401` | Missing or wrong admin token. |
 | `404` | No admin API configured, or the route was called on the public listener. |
 | `409` | The change needs a restart: `server.listen`, `server.read_header_timeout`, `server.admin_listen`, or `server.admin_token_env`. |
@@ -1006,9 +1014,10 @@ Notes:
 - Reload is available only through this endpoint. No signal triggers one.
 
 `GET /admin/status` returns the resolved, non-secret configuration of the
-running process — model aliases, provider base URLs, virtual key names, and
-policies, plus the applied `generation`, `config_hash`, `last_reload_at`, and
-`last_reload_error`. API keys and virtual key values are never included.
+running process — model aliases, provider base URLs, virtual key names,
+config/key-file paths, and policies, plus the applied `generation`,
+`config_hash`, `last_reload_at`, and `last_reload_error`. API keys and virtual
+key values are never included.
 
 ```sh
 curl -fsS -H "Authorization: Bearer $MODEL_PROXY_ADMIN_TOKEN" \

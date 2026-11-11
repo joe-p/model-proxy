@@ -83,6 +83,7 @@ func run() error {
 		"providers", len(cfg.Providers),
 		"policies", len(cfg.Policies),
 		"env_file", cfg.EnvFile,
+		"key_file", cfg.KeyFile,
 		"access_sink", cfg.Logging.AccessSink.Enabled(),
 	)
 	if !cfg.Server.AdminEnabled() {

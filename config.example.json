@@ -1,11 +1,17 @@
 // model-proxy configuration.
 //
 // This is JWCC (JSON with comments and trailing commas). Unknown fields are
-// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are never
-// placed directly in this file; key_env names are resolved from the process
-// environment first, then from env_file.
+// rejected. Durations use Go syntax, e.g. "10s" or "1m30s". Secrets are not
+// placed directly in this file. Virtual keys live in a separate key_file that
+// may contain plaintext keys and should be git ignored; provider credentials
+// use api_key_env, resolved from the process environment first, then env_file.
 {
   "env_file": ".env", // Optional; relative paths are resolved from this file.
+
+  // Virtual keys live in a separate array file so it can be git ignored.
+  // Relative paths are resolved from this file. See keys.example.json. Each
+  // entry sets exactly one of "key" or "key_env".
+  "key_file": "keys.json",
 
   "server": {
     "listen": "127.0.0.1:8080",
@@ -61,24 +67,6 @@
 
   // A virtual key's "policy" is optional. Keys without a policy may use every
   // configured model alias.
-  "virtual_keys": [
-    {
-      "name": "laptop",
-      "key_env": "PROXY_KEY_LAPTOP",
-      "policy": "basic"
-    },
-    {
-      "name": "ci",
-      "key_env": "PROXY_KEY_CI",
-      "policy": "no-smart",
-      // Optional access-log User-Agent override for requests using this key.
-      "user_agent": "Open WebUI"
-    },
-    {
-      "name": "admin",
-      "key_env": "PROXY_KEY_ADMIN"
-    }
-  ],
 
   // Policies restrict which model aliases a virtual key may use. "mode" is
   // "whitelist" (only listed aliases) or "blacklist" (all but listed aliases).

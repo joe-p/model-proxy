@@ -86,42 +86,9 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 		return nil, err
 	}
 
-	keyNames := make(map[string]struct{}, len(raw.VirtualKeys))
-	keyValues := make(map[string]string, len(raw.VirtualKeys))
-	for i, rawKey := range raw.VirtualKeys {
-		name := strings.TrimSpace(rawKey.Name)
-		keyEnv := strings.TrimSpace(rawKey.KeyEnv)
-		userAgent := strings.TrimSpace(rawKey.UserAgent)
-		if name == "" {
-			return nil, fmt.Errorf("virtual_keys[%d].name must not be empty", i)
-		}
-		if keyEnv == "" {
-			return nil, fmt.Errorf("virtual_keys[%d] (%s): key_env must not be empty", i, name)
-		}
-		if err := validateLogValue(userAgent, fmt.Sprintf("virtual_keys[%d] (%s).user_agent", i, name)); err != nil {
-			return nil, err
-		}
-		if _, exists := keyNames[name]; exists {
-			return nil, fmt.Errorf("duplicate virtual key name %q", name)
-		}
-		key, ok := lookupEnv(dotenv, keyEnv)
-		if !ok {
-			return nil, fmt.Errorf("virtual key %q: environment variable %s is not set", name, keyEnv)
-		}
-		if key == "" {
-			return nil, fmt.Errorf("virtual key %q: environment variable %s is empty", name, keyEnv)
-		}
-		if other, exists := keyValues[key]; exists {
-			return nil, fmt.Errorf("virtual keys %q and %q resolve to the same value", other, name)
-		}
-		keyNames[name] = struct{}{}
-		keyValues[key] = name
-		cfg.Keys = append(cfg.Keys, VirtualKey{
-			Name:      name,
-			Key:       key,
-			Policy:    strings.TrimSpace(rawKey.Policy),
-			UserAgent: userAgent,
-		})
+	cfg.Keys, cfg.KeyFile, err = resolveVirtualKeys(raw.KeyFile, configDir, dotenv)
+	if err != nil {
+		return nil, err
 	}
 	if cfg.Auth.Enabled && len(cfg.Keys) == 0 {
 		return nil, fmt.Errorf("auth is enabled but no virtual keys are configured")

@@ -13,6 +13,8 @@ import (
 type Config struct {
 	SourcePath string
 	EnvFile    string
+	// KeyFile is the resolved path of the optional separate virtual-key file.
+	KeyFile string
 
 	Server    ServerConfig
 	Logging   LoggingConfig

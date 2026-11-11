@@ -11,9 +11,7 @@ import (
 )
 
 const baseConfig = `{
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -34,6 +32,16 @@ func writeFile(t *testing.T, dir, name, content string) string {
 	return path
 }
 
+func writeKeysFile(t *testing.T, dir, entries string) {
+	t.Helper()
+	writeFile(t, dir, "keys.json", entries)
+}
+
+func writeBaseKeysFile(t *testing.T, dir string) {
+	t.Helper()
+	writeKeysFile(t, dir, `[{"name": "laptop", "key_env": "PROXY_KEY"}]`)
+}
+
 func unsetEnv(t *testing.T, name string) {
 	t.Helper()
 	old, ok := os.LookupEnv(name)
@@ -52,11 +60,10 @@ func unsetEnv(t *testing.T, name string) {
 func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".env", "PROXY_KEY=from-file\nOPENROUTER_KEY=upstream-from-file\n")
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   "env_file": ".env",
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -104,10 +111,9 @@ func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 
 func TestLoadResolvesProviderTypes(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -142,12 +148,11 @@ func TestLoadResolvesProviderTypes(t *testing.T) {
 
 func TestLoadAcceptsCommentsAndTrailingCommas(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   // Line comments are ignored.
   "auth": {"enabled": true}, /* Block comments are ignored too. */
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"},
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1", // "//" inside strings is preserved
@@ -172,11 +177,10 @@ func TestLoadAcceptsCommentsAndTrailingCommas(t *testing.T) {
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   "server": {"unknown_setting": true},
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -198,6 +202,7 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 
 func TestLoadRejectsTrailingData(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", baseConfig+"\n{}")
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -208,28 +213,29 @@ func TestLoadRejectsTrailingData(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsPlaintextKeyField(t *testing.T) {
+func TestLoadRejectsUnknownFieldInInlineVirtualKeys(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "config.json", `{
   "virtual_keys": [
-    {"name": "laptop", "key": "plaintext"}
+    {"name": "laptop", "key_env": "PROXY_KEY"}
   ]
 }`)
 	t.Setenv("OPENROUTER_KEY", "upstream")
 
 	_, err := Load(path)
 	if err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("expected unknown field error for key, got %v", err)
+		t.Fatalf("expected unknown field error for virtual_keys, got %v", err)
 	}
 }
 
 func TestLoadRejectsDuplicateResolvedKeys(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
+	writeKeysFile(t, dir, `[
     {"name": "one", "key_env": "KEY_ONE"},
     {"name": "two", "key_env": "KEY_TWO"}
-  ],
+  ]`)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -252,6 +258,7 @@ func TestLoadRejectsDuplicateResolvedKeys(t *testing.T) {
 
 func TestLoadRejectsMissingEnv(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", baseConfig)
 	unsetEnv(t, "PROXY_KEY")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -332,11 +339,10 @@ func TestLoadRejectsUnknownProviderReference(t *testing.T) {
 
 func TestLoadRejectsInvalidDuration(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   "server": {"read_header_timeout": "soon"},
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -358,11 +364,10 @@ func TestLoadRejectsInvalidDuration(t *testing.T) {
 
 func TestLoadRejectsMissingEnvFile(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   "env_file": ".env",
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -384,11 +389,12 @@ func TestLoadRejectsMissingEnvFile(t *testing.T) {
 
 func TestLoadResolvesPoliciesAndKeyReferences(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
+	writeKeysFile(t, dir, `[
     {"name": "laptop", "key_env": "PROXY_KEY", "policy": "basic"},
     {"name": "unrestricted", "key_env": "PROXY_KEY_2"}
-  ],
+  ]`)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
   "policies": [
     {"name": "basic", "mode": "whitelist", "models": ["fast"]}
   ],
@@ -434,11 +440,12 @@ func TestLoadResolvesPoliciesAndKeyReferences(t *testing.T) {
 
 func TestLoadResolvesVirtualKeyUserAgent(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
+	writeKeysFile(t, dir, `[
     {"name": "custom", "key_env": "PROXY_KEY", "user_agent": "  my-client/2.0  "},
     {"name": "default", "key_env": "PROXY_KEY_2"}
-  ],
+  ]`)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -467,10 +474,11 @@ func TestLoadResolvesVirtualKeyUserAgent(t *testing.T) {
 
 func TestLoadRejectsInvalidVirtualKeyUserAgent(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
+	writeKeysFile(t, dir, `[
     {"name": "bad", "key_env": "PROXY_KEY", "user_agent": "client\r\nX-Injected: yes"}
-  ],
+  ]`)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -492,10 +500,11 @@ func TestLoadRejectsInvalidVirtualKeyUserAgent(t *testing.T) {
 
 func TestLoadRejectsUnknownPolicyReference(t *testing.T) {
 	dir := t.TempDir()
-	path := writeFile(t, dir, "config.json", `{
-  "virtual_keys": [
+	writeKeysFile(t, dir, `[
     {"name": "laptop", "key_env": "PROXY_KEY", "policy": "missing"}
-  ],
+  ]`)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -783,6 +792,7 @@ func TestLoadResolvesPricing(t *testing.T) {
 
 func TestLoadPricingDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", baseConfig)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -1115,11 +1125,10 @@ func TestLoadPassthroughProvidersAreSorted(t *testing.T) {
 
 func TestLoadRejectsRetiredCompatibilityBlock(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", `{
   "compatibility": {"openrouter": false},
-  "virtual_keys": [
-    {"name": "laptop", "key_env": "PROXY_KEY"}
-  ],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -1219,6 +1228,7 @@ func TestLoadAccessSinkDefaults(t *testing.T) {
 
 func TestLoadAccessSinkDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", baseConfig)
 	t.Setenv("PROXY_KEY", "secret")
 	t.Setenv("OPENROUTER_KEY", "upstream")
@@ -1333,6 +1343,7 @@ func TestLoadResolvesAdminAPI(t *testing.T) {
 
 func TestLoadAdminDisabledByDefault(t *testing.T) {
 	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
 	path := writeFile(t, dir, "config.json", baseConfig)
 	t.Setenv("PROXY_KEY", "key")
 	t.Setenv("OPENROUTER_KEY", "upstream")

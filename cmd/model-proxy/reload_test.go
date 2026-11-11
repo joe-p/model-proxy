@@ -18,7 +18,7 @@ import (
 const reloadTestConfig = `{
   "server": {"listen": "127.0.0.1:0"},
   "logging": {"level": "error"},
-  "virtual_keys": [{"name": "laptop", "key_env": "PROXY_KEY"}],
+  "key_file": "keys.json",
   "providers": {
     "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
   },
@@ -30,6 +30,9 @@ const reloadTestConfig = `{
 // writeReloadConfig rewrites the config file with the given models block.
 func writeReloadConfig(t *testing.T, path, models string) {
 	t.Helper()
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "keys.json"), []byte(`[{"name": "laptop", "key_env": "PROXY_KEY"}]`), 0o600); err != nil {
+		t.Fatalf("write keys: %v", err)
+	}
 	if err := os.WriteFile(path, []byte(fmt.Sprintf(reloadTestConfig, models)), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -146,4 +149,84 @@ func modelIDs(t *testing.T, baseURL string) []string {
 		ids = append(ids, entry.ID)
 	}
 	return ids
+}
+
+func TestReloaderDetectsKeyFileChange(t *testing.T) {
+	t.Setenv("OPENROUTER_KEY", "upstream-key")
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	keyPath := filepath.Join(dir, "keys.json")
+	configData := `{
+  "server": {"listen": "127.0.0.1:0"},
+  "logging": {"level": "error"},
+  "key_file": "keys.json",
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {
+    "fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}
+  }
+}`
+	if err := os.WriteFile(configPath, []byte(configData), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	writeKeys := func(name string) {
+		t.Helper()
+		body := fmt.Sprintf(`[{"name": "%s", "key": "%s-key"}]`, name, name)
+		if err := os.WriteFile(keyPath, []byte(body), 0o600); err != nil {
+			t.Fatalf("write keys: %v", err)
+		}
+	}
+	writeKeys("first")
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.KeyFile != keyPath {
+		t.Fatalf("key file = %q, want %q", cfg.KeyFile, keyPath)
+	}
+	logs, _, err := newLogRuntime(cfg, nil)
+	if err != nil {
+		t.Fatalf("newLogRuntime: %v", err)
+	}
+	providers, err := buildProviders(cfg)
+	if err != nil {
+		t.Fatalf("buildProviders: %v", err)
+	}
+	srv := server.New(cfg, providers, logs.logger, nil, server.WithReloader(nil))
+	proxy := httptest.NewServer(srv)
+	defer proxy.Close()
+
+	rl := newReloader(cfg, logs, nil)
+	rl.attach(srv)
+
+	res, err := rl.ReloadConfig(context.Background(), false)
+	if err != nil {
+		t.Fatalf("reload unchanged: %v", err)
+	}
+	if res.Changed {
+		t.Fatal("unchanged config and key file must not report a change")
+	}
+
+	writeKeys("second")
+	res, err = rl.ReloadConfig(context.Background(), false)
+	if err != nil {
+		t.Fatalf("reload changed key file: %v", err)
+	}
+	if !res.Changed || res.Keys != 1 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer second-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new key status = %d, want 200", resp.StatusCode)
+	}
 }

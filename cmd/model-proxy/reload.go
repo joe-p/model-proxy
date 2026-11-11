@@ -39,7 +39,7 @@ func newReloader(cfg *config.Config, logs *logRuntime, pricingCancel context.Can
 		pricingCancel:   pricingCancel,
 		applied:         cfg,
 	}
-	if hash, err := hashFile(r.path); err == nil {
+	if hash, err := hashReloadInputs(r.path, cfg.KeyFile); err == nil {
 		// Remember the version that is already applied so that an unchanged file
 		// is a cheap no-op instead of a rebuild.
 		r.hash = hash
@@ -72,7 +72,7 @@ func (r *reloader) ReloadConfig(ctx context.Context, force bool) (server.ReloadR
 		return server.ReloadResult{}, fmt.Errorf("reload is not available")
 	}
 
-	sum, err := hashFile(r.path)
+	sum, err := hashReloadInputs(r.path, r.applied.KeyFile)
 	if err != nil {
 		return server.ReloadResult{}, err
 	}
@@ -150,11 +150,31 @@ func (r *reloader) ReloadConfig(ctx context.Context, force bool) (server.ReloadR
 	}, nil
 }
 
-func hashFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read config %s: %w", path, err)
+// hashReloadInputs hashes every file that contributes to the runtime
+// configuration. The key file is included so that rotating a virtual key is a
+// change even when the main configuration is byte-identical.
+func hashReloadInputs(configPath, keyFile string) (string, error) {
+	type input struct {
+		kind string
+		path string
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	inputs := []input{{kind: "config", path: configPath}}
+	if keyFile != "" {
+		inputs = append(inputs, input{kind: "key file", path: keyFile})
+	}
+
+	h := sha256.New()
+	for _, input := range inputs {
+		data, err := os.ReadFile(input.path)
+		if err != nil {
+			return "", fmt.Errorf("read %s %s: %w", input.kind, input.path, err)
+		}
+		_, _ = h.Write([]byte(input.kind))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(input.path))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

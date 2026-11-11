@@ -1,4 +1,5 @@
 /config.json
+/keys.json
 .env
 /bin/
 /model-proxy

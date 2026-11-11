@@ -230,6 +230,7 @@ type adminStatus struct {
 	UptimeSeconds      float64             `json:"uptime_seconds"`
 	ConfigPath         string              `json:"config_path,omitempty"`
 	EnvFile            string              `json:"env_file,omitempty"`
+	KeyFile            string              `json:"key_file,omitempty"`
 	Listen             string              `json:"listen"`
 	AdminListen        string              `json:"admin_listen,omitempty"`
 	ReloadAvailable    bool                `json:"reload_available"`
@@ -286,6 +287,7 @@ func (s *Server) adminStatus(st *state) adminStatus {
 		UptimeSeconds:      time.Since(s.startedAt).Seconds(),
 		ConfigPath:         cfg.SourcePath,
 		EnvFile:            cfg.EnvFile,
+		KeyFile:            cfg.KeyFile,
 		Listen:             cfg.Server.Listen,
 		AdminListen:        cfg.Server.AdminListen,
 		ReloadAvailable:    st.reloader != nil,
