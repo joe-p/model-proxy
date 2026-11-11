@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/joe-p/model-proxy/internal/auth"
 	"github.com/joe-p/model-proxy/internal/claudesub"
@@ -21,6 +22,12 @@ const (
 	claudeProxyKeyHeader = "X-Model-Proxy-Key"
 	// claudeSubPath is the path prefix stripped before forwarding upstream.
 	claudeSubPath = "/claude_sub"
+	// claudeErrorHeadBytes bounds how much of an upstream error body is buffered
+	// so the access log can say why Anthropic rejected the request. Error
+	// envelopes are a few hundred bytes; oversized bodies are streamed on.
+	claudeErrorHeadBytes = 4 << 10
+	// claudeErrorDetailLimit caps the length of that access-log detail.
+	claudeErrorDetailLimit = 300
 )
 
 // handleClaudeSub transparently proxies Anthropic's Messages API using the
@@ -124,9 +131,23 @@ func (s *Server) handleClaudeSub(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode >= 400 {
 		lr.errorCode = "upstream_error"
+		// Sample the head of the error envelope so the access log records why
+		// upstream refused (rate limit, overload, expired credential).
+		head, readErr := io.ReadAll(io.LimitReader(resp.Body, claudeErrorHeadBytes))
+		if readErr != nil {
+			if r.Context().Err() == nil {
+				lr.errorDetail = readErr.Error()
+			}
+		} else {
+			lr.errorDetail = claudeUpstreamErrorDetail(head)
+		}
 		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil && r.Context().Err() == nil {
-			lr.errorDetail = err.Error()
+		_, copyErr := w.Write(head)
+		if copyErr == nil {
+			_, copyErr = io.Copy(w, resp.Body)
+		}
+		if copyErr != nil && r.Context().Err() == nil && lr.errorDetail == "" {
+			lr.errorDetail = copyErr.Error()
 		}
 		if r.Context().Err() != nil {
 			lr.clientCanceled = true
@@ -149,6 +170,46 @@ func (s *Server) handleClaudeSub(w http.ResponseWriter, r *http.Request) {
 		lr.clientCanceled = true
 	}
 	applyClaudeEstimatedCost(lr, st, model)
+}
+
+// claudeUpstreamErrorDetail renders Anthropic's error envelope as a short
+// access-log detail, for example "rate_limit_error: Number of requests has
+// exceeded your rate limit". Bodies that are not an error envelope (an HTML
+// error page from an intermediary, say) are collapsed to a single clipped line.
+func claudeUpstreamErrorDetail(body []byte) string {
+	var envelope struct {
+		Error *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(body), &envelope); err == nil && envelope.Error != nil {
+		errorType := strings.TrimSpace(envelope.Error.Type)
+		message := strings.TrimSpace(envelope.Error.Message)
+		switch {
+		case errorType != "" && message != "":
+			return clipClaudeDetail(errorType + ": " + message)
+		case errorType != "":
+			return clipClaudeDetail(errorType)
+		case message != "":
+			return clipClaudeDetail(message)
+		}
+	}
+	return clipClaudeDetail(string(body))
+}
+
+// clipClaudeDetail collapses whitespace and caps an access-log detail.
+func clipClaudeDetail(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	if len(value) <= claudeErrorDetailLimit {
+		return value
+	}
+	// Back off to a rune boundary so the log line stays valid UTF-8.
+	cut := claudeErrorDetailLimit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "..."
 }
 
 // claudeRequestFields reads the model and stream flag from a Messages request.

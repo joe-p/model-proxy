@@ -248,6 +248,8 @@ func TestClaudeSubPassesThroughUpstreamError(t *testing.T) {
 		t.Fatalf("upstream error body changed:\nwant %s\ngot  %s", errorBody, body)
 	}
 	waitForLog(t, logs, `"error_code":"upstream_error"`)
+	// The access log must name the reason, not just that upstream failed.
+	waitForLog(t, logs, `"error":"rate_limit_error: slow down"`)
 }
 
 func TestClaudeSubStreamsTransparentlyAndLogsUsage(t *testing.T) {
