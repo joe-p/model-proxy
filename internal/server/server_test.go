@@ -1069,6 +1069,51 @@ func TestChatPassesThroughUnlistedModel(t *testing.T) {
 	waitForLog(t, logs, `"upstream_model":"anthropic/claude-sonnet-5"`)
 }
 
+func TestChatPassesThroughNamespacedModel(t *testing.T) {
+	var gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var fields map[string]json.RawMessage
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &fields)
+		_ = json.Unmarshal(fields["model"], &gotModel)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	proxy, logs := passthroughProxy(t, upstream, nil)
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"openrouter/gpt-5.6-sol","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	if gotModel != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want provider prefix stripped", gotModel)
+	}
+	if alias := resp.Header.Get("X-Model-Proxy-Alias"); alias != "openrouter/gpt-5.6-sol" {
+		t.Fatalf("alias header = %q, want requested id", alias)
+	}
+	if up := resp.Header.Get("X-Model-Proxy-Upstream"); up != "gpt-5.6-sol" {
+		t.Fatalf("upstream header = %q, want stripped id", up)
+	}
+	waitForLog(t, logs, `"passthrough":true`)
+	waitForLog(t, logs, `"alias":"openrouter/gpt-5.6-sol"`)
+	waitForLog(t, logs, `"upstream_model":"gpt-5.6-sol"`)
+}
+
+func TestChatRejectsPrefixOfNonPassthroughProvider(t *testing.T) {
+	proxy, _ := newTestProxy(t, "http://127.0.0.1:1", nil)
+
+	resp := postChat(t, proxy.URL, "test-key", `{"model":"openrouter/gpt-5.6-sol","messages":[]}`)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "passthrough") {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+}
+
 func TestResponsesPassesThroughUnlistedModel(t *testing.T) {
 	var gotModel string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1101,7 +1146,7 @@ func TestPassthroughRespectsPolicies(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/models" {
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":[{"id":"fast"},{"id":"denied-model"},{"id":"allowed-model"}]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"denied-model"},{"id":"allowed-model"}]}`))
 			return
 		}
 		upstreamCalls.Add(1)
@@ -1139,11 +1184,15 @@ func TestPassthroughRespectsPolicies(t *testing.T) {
 		t.Fatalf("blacklist passthrough status = %d", resp.StatusCode)
 	}
 
-	// A blacklist key may not use a passthrough id it lists.
-	resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"denied-model","messages":[]}`)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("blacklisted passthrough status = %d", resp.StatusCode)
+	// A blacklist key may not use a passthrough id it lists, in either the bare
+	// or the provider-prefixed form.
+	for _, modelID := range []string{"denied-model", "openrouter/denied-model"} {
+		resp = postChat(t, proxy.URL, "deny-fast-key", `{"model":"`+modelID+`","messages":[]}`)
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("blacklisted passthrough %q status = %d, body = %s", modelID, resp.StatusCode, body)
+		}
 	}
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1", got)
@@ -1169,7 +1218,7 @@ func TestPassthroughRespectsPolicies(t *testing.T) {
 	for _, entry := range payload.Data {
 		got = append(got, entry.ID)
 	}
-	if want := []string{"allowed-model", "fast", "smart"}; strings.Join(got, ",") != strings.Join(want, ",") {
+	if want := []string{"fast", "openrouter/allowed-model", "smart"}; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("models = %v, want %v", got, want)
 	}
 }
@@ -1244,7 +1293,7 @@ func TestModelsListsDiscoveredPassthroughModels(t *testing.T) {
 		}
 		discoveryCalls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[{"id":"fast"},{"id":"zeta-model"},{"id":"alpha-model"}]}`))
+		_, _ = w.Write([]byte(`{"data":[{"id":"zeta-model"},{"id":"alpha-model"}]}`))
 	}))
 	defer upstream.Close()
 
@@ -1276,14 +1325,61 @@ func TestModelsListsDiscoveredPassthroughModels(t *testing.T) {
 				t.Fatalf("unexpected metadata for %q: %+v", entry.ID, entry)
 			}
 		}
-		// Aliases and discovered ids are merged and de-duplicated.
-		if want := []string{"alpha-model", "fast", "smart", "zeta-model"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		// Aliases and discovered ids are merged; discovered ids are namespaced so
+		// their provider is explicit.
+		if want := []string{"fast", "openrouter/alpha-model", "openrouter/zeta-model", "smart"}; strings.Join(got, ",") != strings.Join(want, ",") {
 			t.Fatalf("models = %v, want %v", got, want)
 		}
 	}
 
 	if got := discoveryCalls.Load(); got != 1 {
 		t.Fatalf("discovery calls = %d, want 1 (cached)", got)
+	}
+}
+
+func TestModelsAliasWinsOverDiscoveredPassthroughID(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"alias-model"}]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := passthroughProxy(t, upstream, func(cfg *config.Config) {
+		cfg.Models["openrouter/alias-model"] = config.ModelConfig{
+			Alias:    "openrouter/alias-model",
+			Provider: "openrouter",
+			Upstream: "configured-upstream",
+		}
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	count := 0
+	for _, entry := range payload.Data {
+		if entry.ID == "openrouter/alias-model" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("models = %+v, want openrouter/alias-model exactly once", payload.Data)
 	}
 }
 

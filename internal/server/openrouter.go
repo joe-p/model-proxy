@@ -70,8 +70,8 @@ type modelEntry struct {
 }
 
 // modelEntries returns every model id an authenticated key may use: configured
-// aliases plus ids discovered from passthrough providers. Aliases win on
-// conflict.
+// aliases plus ids discovered from passthrough providers, exposed as
+// "<provider>/<id>". Aliases win on conflict.
 func (s *Server) modelEntries(ctx context.Context, st *state, key *config.VirtualKey) []modelEntry {
 	seen := make(map[string]struct{}, len(st.cfg.Models))
 	entries := make([]modelEntry, 0, len(st.cfg.Models))
@@ -92,16 +92,21 @@ func (s *Server) modelEntries(ctx context.Context, st *state, key *config.Virtua
 
 	for _, providerName := range st.cfg.PassthroughProviderNames() {
 		for _, id := range s.passthroughModels(ctx, st, providerName) {
-			if _, exists := seen[id]; exists {
+			// Passthrough ids carry their provider as a prefix, matching the
+			// shape of configured aliases and keeping ids from different
+			// passthrough providers distinct.
+			alias := providerName + "/" + id
+			if _, exists := seen[alias]; exists {
 				continue
 			}
-			if !st.cfg.ModelAllowed(key, id) {
+			// Policies may name the exposed id or its bare upstream id.
+			if !st.cfg.ModelAllowed(key, alias) || !st.cfg.ModelAllowed(key, id) {
 				continue
 			}
-			seen[id] = struct{}{}
+			seen[alias] = struct{}{}
 			entries = append(entries, modelEntry{
-				ID:          id,
-				Name:        id,
+				ID:          alias,
+				Name:        alias,
 				Provider:    providerName,
 				Upstream:    id,
 				Passthrough: true,

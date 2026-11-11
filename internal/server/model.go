@@ -7,19 +7,36 @@ import (
 	"github.com/joe-p/model-proxy/internal/config"
 )
 
-// resolveModel maps the model name from a request onto a configured alias or,
-// when exactly one provider allows passthrough models, onto that provider with
-// the requested name used unchanged as the upstream model id.
+// resolveModel maps the model name from a request onto a configured alias or
+// onto a provider that allows passthrough models. A "<provider>/<upstream>" id
+// selects the provider explicitly and the prefix is stripped before the
+// upstream call. An unlisted id without such a prefix goes to the single
+// provider that allows passthrough models, with the id used unchanged as the
+// upstream model id.
 //
 // Policies apply to passthrough ids the same way they apply to aliases: a
 // whitelist key may only use the names it lists, and a blacklist key may use
-// anything it does not list.
+// anything it does not list. Both the requested id and its bare upstream form
+// are checked, so a blacklist entry cannot be bypassed with the other form.
 func resolveModel(cfg *config.Config, key *config.VirtualKey, name string) (config.ModelConfig, *apiError) {
 	if model, ok := cfg.Models[name]; ok {
 		if !cfg.ModelAllowed(key, name) {
 			return config.ModelConfig{}, errModelNotAllowed()
 		}
 		return model, nil
+	}
+
+	if providerName, upstream, ok := cfg.SplitProviderModel(name); ok {
+		if !cfg.Providers[providerName].PassthroughModels {
+			return config.ModelConfig{}, errInvalidRequest(fmt.Sprintf(
+				"Model %q names provider %q, which does not allow passthrough models; add it to models",
+				name, providerName,
+			))
+		}
+		if !cfg.ModelAllowed(key, name) || !cfg.ModelAllowed(key, upstream) {
+			return config.ModelConfig{}, errModelNotAllowed()
+		}
+		return passthroughModel(cfg, providerName, name, upstream), nil
 	}
 
 	candidates := cfg.PassthroughProviderNames()
@@ -32,16 +49,21 @@ func resolveModel(cfg *config.Config, key *config.VirtualKey, name string) (conf
 			name, strings.Join(candidates, ", "),
 		))
 	}
-	if !cfg.ModelAllowed(key, name) {
+	providerName := candidates[0]
+	if !cfg.ModelAllowed(key, name) || !cfg.ModelAllowed(key, providerName+"/"+name) {
 		return config.ModelConfig{}, errModelNotAllowed()
 	}
+	return passthroughModel(cfg, providerName, name, name), nil
+}
 
-	providerName := candidates[0]
+// passthroughModel builds the route for a passed-through id. alias is the id
+// the client asked for and upstream is what the provider receives.
+func passthroughModel(cfg *config.Config, providerName, alias, upstream string) config.ModelConfig {
 	return config.ModelConfig{
-		Alias:       name,
+		Alias:       alias,
 		Provider:    providerName,
-		Upstream:    name,
+		Upstream:    upstream,
 		ExtraBody:   cfg.Providers[providerName].ExtraBody,
 		Passthrough: true,
-	}, nil
+	}
 }

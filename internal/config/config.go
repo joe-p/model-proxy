@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -156,6 +157,23 @@ func (c *Config) PassthroughProviderNames() []string {
 	return names
 }
 
+// SplitProviderModel splits a model id of the form "<provider>/<upstream>"
+// when the provider name matches a configured provider. The longest matching
+// provider name wins, so upstream ids may contain slashes of their own. The
+// returned upstream is never empty.
+func (c *Config) SplitProviderModel(id string) (providerName, upstream string, ok bool) {
+	for name := range c.Providers {
+		if len(id) <= len(name)+1 || !strings.HasPrefix(id, name+"/") {
+			continue
+		}
+		if len(name) <= len(providerName) {
+			continue
+		}
+		providerName, upstream, ok = name, id[len(name)+1:], true
+	}
+	return providerName, upstream, ok
+}
+
 type ModelConfig struct {
 	Alias     string
 	Provider  string
@@ -164,7 +182,8 @@ type ModelConfig struct {
 	Pricing   *ModelPricing
 
 	// Passthrough marks a model that was forwarded without a configured alias.
-	// Alias then holds the requested id, which is also the upstream id.
+	// Alias holds the requested id; Upstream is that id without a
+	// "<provider>/" prefix when the client used one.
 	Passthrough bool
 }
 

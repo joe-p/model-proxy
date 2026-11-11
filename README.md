@@ -510,8 +510,9 @@ untouched. There are no proxy-level retries or fallbacks.
 ### Passthrough models
 
 Set `passthrough_models` on a provider to accept model ids that are not listed
-under `models`. The requested id is sent upstream unchanged, so a new upstream
-model needs no config change:
+under `models`. Passthrough ids are exposed and routed as
+`<provider>/<upstream>`, the same shape as the aliases above, so the provider is
+explicit and a new upstream model needs no config change:
 
 ```jsonc
 "codex": {
@@ -522,26 +523,34 @@ model needs no config change:
 }
 ```
 
-With that config, `{"model": "gpt-5.6-sol"}` is forwarded to the Codex backend
-as `gpt-5.6-sol`. Configured aliases always win over passthrough, so keep using
-an alias when you want a stable name or request-body overrides.
+With that config, `{"model": "codex/gpt-5.6-sol"}` is forwarded to the Codex
+backend as `gpt-5.6-sol`, and `GET /v1/models` lists it as
+`codex/gpt-5.6-sol`. The prefix is stripped before the upstream call and any
+further slashes belong to the upstream id, so an aggregator-style
+`openrouter/deepseek/deepseek-v4` reaches OpenRouter's
+`deepseek/deepseek-v4`. Configured aliases always win over passthrough, so keep
+using an alias when you want a stable name or request-body overrides.
 
-- **One provider only.** An unlisted id is routed to the single provider with
-  `passthrough_models` enabled. If several providers enable it, the id is
-  ambiguous and the request fails with `400 invalid_request` naming the
-  candidates; add the model to `models` to choose one.
+- **Provider selection.** A prefixed id is routed to the named provider, which
+  must have `passthrough_models` enabled; otherwise the request fails with
+  `400 invalid_request`. An unlisted id without a prefix is routed to the single
+  provider with `passthrough_models` enabled, with the id used unchanged. If
+  several providers enable it, an unprefixed id is ambiguous and the request
+  fails with `400 invalid_request` naming the candidates; prefix it instead.
 - **Policies still apply.** A `whitelist` key may only use the names it lists, so
   it cannot use passthrough ids. A `blacklist` key may use passthrough ids it
-  does not list. Passthrough requests are logged with `"passthrough": true`,
-  and the alias equals the upstream model id.
+  does not list; blacklisting either the prefixed id or its bare upstream id
+  denies both forms. Passthrough requests are logged with
+  `"passthrough": true`; the alias is the requested id and `upstream_model` is
+  the id without the provider prefix.
 - **Provider defaults apply.** Provider-level `extra_body`, `billing_mode`, and
   `pricing_provider` are used. Model-level `extra_body` and `pricing` overrides
   require a configured alias.
 - **`GET /v1/models` includes discovered ids.** For each passthrough provider the
-  proxy asks the upstream for its model list and merges it with the aliases,
-  honoring the authenticated key's policy. Results are cached for one minute and
-  cleared on reload; a failing or unsupported listing is logged and skipped, so
-  the aliases are still returned.
+  proxy asks the upstream for its model list and merges it with the aliases as
+  `<provider>/<id>`, honoring the authenticated key's policy. Results are cached
+  for one minute and cleared on reload; a failing or unsupported listing is
+  logged and skipped, so the aliases are still returned.
 
 The proxy lists models with `GET <base_url>/models`, reading either
 `{"data":[{"id":"..."}]}` (OpenAI, OpenRouter) or `{"models":[{"slug":"..."}]}`
@@ -793,6 +802,7 @@ the amount charged to a subscription.
 | Unknown alias | 404 | `model_not_found` |
 | Malformed JSON | 400 | `invalid_request` |
 | Unlisted model with several passthrough providers | 400 | `invalid_request` |
+| Model prefixed with a provider that disallows passthrough | 400 | `invalid_request` |
 | Body over `max_body_bytes` | 413 | `request_too_large` |
 | Upstream unreachable | 502 | `upstream_unavailable` |
 | Upstream response-header timeout | 504 | `upstream_timeout` |
@@ -899,7 +909,7 @@ other request, with `path` set to `/admin/reload`.
 | `policy` | string | when the key has a policy | Attached policy name. |
 | `policy_mode` | string | when the key has a policy | `whitelist` or `blacklist`. |
 | `policy_models` | string[] | when the key has a policy | Policy's model list. |
-| `alias` | string | when resolved | Requested model alias. |
+| `alias` | string | when resolved | Requested model id (alias or passthrough id). |
 | `provider` | string | when resolved | Configured provider name. |
 | `billing_mode` | string | when set | For example `subscription`; see below. |
 | `upstream_model` | string | when resolved | Model id sent upstream. |
