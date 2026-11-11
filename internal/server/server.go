@@ -141,6 +141,11 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 	for _, prefix := range []string{"/v1", "/api/v1"} {
 		s.mux.HandleFunc(prefix+"/chat/completions", s.handleChatCompletions)
 		s.mux.HandleFunc(prefix+"/responses", s.handleResponses)
+		// OpenRouter's dedicated Image API uses /images; OpenAI clients use
+		// /images/generations. Both are aliases for the same handler because the
+		// upstream path is configured per provider.
+		s.mux.HandleFunc(prefix+"/images", s.handleImagesGenerations)
+		s.mux.HandleFunc(prefix+"/images/generations", s.handleImagesGenerations)
 		s.mux.HandleFunc(prefix+"/models", s.handleModels)
 	}
 	// Codex clients and usage extensions expect ChatGPT's usage path. The

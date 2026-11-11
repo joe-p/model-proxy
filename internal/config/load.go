@@ -69,6 +69,7 @@ type rawPolicy struct {
 type rawProvider struct {
 	Type                  string         `json:"type"`
 	BaseURL               string         `json:"base_url"`
+	ImagesPath            string         `json:"images_path"`
 	APIKeyEnv             string         `json:"api_key_env"`
 	AuthDir               string         `json:"auth_dir"`
 	BillingMode           string         `json:"billing_mode"`

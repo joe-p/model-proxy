@@ -9,7 +9,7 @@ import (
 // Provider is an OpenAI-compatible transport preconfigured for OpenRouter.
 type Provider = openaicompat.Provider
 
-func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.Duration, referer, title string) (*Provider, error) {
+func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.Duration, referer, title, imagesPath string) (*Provider, error) {
 	headers := make(map[string]string, 2)
 	if referer != "" {
 		headers["HTTP-Referer"] = referer
@@ -23,6 +23,7 @@ func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.D
 		APIKey:                apiKey,
 		DialTimeout:           dialTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
+		ImagesPath:            imagesPath,
 		Headers:               headers,
 	})
 }

@@ -11,12 +11,13 @@ import (
 // Provider is an OpenAI-compatible chat completions provider.
 type Provider = openaicompat.Provider
 
-func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.Duration) (*Provider, error) {
+func New(name, baseURL, apiKey string, dialTimeout, responseHeaderTimeout time.Duration, imagesPath string) (*Provider, error) {
 	return openaicompat.New(openaicompat.Options{
 		Name:                  name,
 		BaseURL:               baseURL,
 		APIKey:                apiKey,
 		DialTimeout:           dialTimeout,
 		ResponseHeaderTimeout: responseHeaderTimeout,
+		ImagesPath:            imagesPath,
 	})
 }

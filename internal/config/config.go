@@ -133,6 +133,7 @@ type ProviderConfig struct {
 	Name                  string
 	Type                  string
 	BaseURL               string
+	ImagesPath            string
 	APIKey                string
 	AuthDir               string
 	BillingMode           string

@@ -240,6 +240,7 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				providerCfg.ResponseHeaderTimeout,
 				providerCfg.Referer,
 				providerCfg.Title,
+				providerCfg.ImagesPath,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("provider %q: %w", name, err)
@@ -252,6 +253,7 @@ func buildProviders(cfg *config.Config) (map[string]provider.Provider, error) {
 				providerCfg.APIKey,
 				providerCfg.DialTimeout,
 				providerCfg.ResponseHeaderTimeout,
+				providerCfg.ImagesPath,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("provider %q: %w", name, err)

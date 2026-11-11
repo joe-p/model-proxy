@@ -163,6 +163,22 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			return nil, err
 		}
 
+		imagesPath := strings.TrimSpace(rawProvider.ImagesPath)
+		if imagesPath != "" {
+			if codexProvider {
+				return nil, fmt.Errorf("provider %q: images_path is not supported for codex providers", name)
+			}
+			if !strings.HasPrefix(imagesPath, "/") {
+				return nil, fmt.Errorf("provider %q: images_path must start with \"/\"", name)
+			}
+			if strings.ContainsAny(imagesPath, " \t\r\n") {
+				return nil, fmt.Errorf("provider %q: images_path must not contain whitespace", name)
+			}
+			if err := validateLogValue(imagesPath, fmt.Sprintf("provider %q images_path", name)); err != nil {
+				return nil, err
+			}
+		}
+
 		clientVersion := strings.TrimSpace(rawProvider.ClientVersion)
 		if clientVersion != "" && !codexProvider {
 			return nil, fmt.Errorf("provider %q: client_version is only supported for codex providers", name)
@@ -193,6 +209,7 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			Name:                  name,
 			Type:                  providerType,
 			BaseURL:               baseURL,
+			ImagesPath:            imagesPath,
 			APIKey:                apiKey,
 			AuthDir:               authDir,
 			BillingMode:           billingMode,

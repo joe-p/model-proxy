@@ -100,6 +100,11 @@
       "referer": "https://example.com",
       "title": "model-proxy",
 
+      // Upstream path for POST /v1/images/generations. The default is
+      // "/images/generations" (OpenAI). OpenRouter's dedicated Image API is
+      // served at "/images" under its /api/v1 base URL.
+      "images_path": "/images",
+
       // Optional defaults injected into every upstream request body for models
       // using this provider. These are body fields, not HTTP headers.
       "extra_body": {
@@ -175,6 +180,12 @@
     "private": {
       "provider": "phala",
       "upstream": "z-ai/glm-5.3"
+    },
+    // Image aliases use the same registry and are called through
+    // POST /v1/images/generations.
+    "image": {
+      "provider": "openrouter",
+      "upstream": "google/gemini-2.5-flash-image"
     }
   }
 }

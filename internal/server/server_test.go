@@ -111,6 +111,7 @@ func newTestProxyWithPricing(t *testing.T, upstreamURL, providerType string, twe
 			providerCfg.ResponseHeaderTimeout,
 			providerCfg.Referer,
 			providerCfg.Title,
+			providerCfg.ImagesPath,
 		)
 	case "openai-compatible":
 		p, err = openai.New(
@@ -119,6 +120,7 @@ func newTestProxyWithPricing(t *testing.T, upstreamURL, providerType string, twe
 			providerCfg.APIKey,
 			providerCfg.DialTimeout,
 			providerCfg.ResponseHeaderTimeout,
+			providerCfg.ImagesPath,
 		)
 	default:
 		t.Fatalf("unsupported test provider type %q", providerType)

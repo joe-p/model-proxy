@@ -59,6 +59,7 @@ func TestChatCompletionsUsesOpenAIEndpointAndHeaders(t *testing.T) {
 		"phala-key",
 		time.Second,
 		time.Second,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -94,7 +95,7 @@ func TestChatCompletionsDefaultsAcceptForStreaming(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	p, err := openai.New("phala", upstream.URL+"/v1", "key", time.Second, time.Second)
+	p, err := openai.New("phala", upstream.URL+"/v1", "key", time.Second, time.Second, "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

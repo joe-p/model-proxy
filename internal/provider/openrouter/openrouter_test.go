@@ -35,6 +35,7 @@ func TestChatCompletionsSendsAttributionHeaders(t *testing.T) {
 		time.Second,
 		"https://example.test",
 		"model-proxy-test",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("New: %v", err)

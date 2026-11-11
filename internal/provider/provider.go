@@ -6,7 +6,8 @@ import (
 	"net/http"
 )
 
-// Request is the provider-neutral input for a chat completion call.
+// Request is the provider-neutral input for an upstream POST request. The
+// server fills the fields a given endpoint understands.
 type Request struct {
 	UpstreamModel string
 	Body          []byte
@@ -33,6 +34,13 @@ type Provider interface {
 	Name() string
 	ChatCompletions(ctx context.Context, req Request) (*http.Response, error)
 	Responses(ctx context.Context, req Request) (*http.Response, error)
+}
+
+// ImagesProvider is implemented by providers that serve OpenAI-compatible
+// image generation requests. The server exposes POST /v1/images/generations for
+// these providers and reports a configuration error for the others.
+type ImagesProvider interface {
+	Images(ctx context.Context, req Request) (*http.Response, error)
 }
 
 // ModelLister is implemented by providers that can enumerate the models they

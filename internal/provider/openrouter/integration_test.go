@@ -28,6 +28,7 @@ func TestLiveChatCompletion(t *testing.T) {
 		120*time.Second,
 		"",
 		"model-proxy-integration-test",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("openrouter.New: %v", err)

@@ -1413,3 +1413,84 @@ func TestLoadRejectsMissingAdminTokenEnv(t *testing.T) {
 		t.Fatal("expected an unset admin token env var to be rejected")
 	}
 }
+
+func TestLoadResolvesProviderImagesPath(t *testing.T) {
+	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY",
+      "images_path": "/images"
+    }
+  },
+  "models": {
+    "image": {"provider": "openrouter", "upstream": "openai/gpt-image-1"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["openrouter"].ImagesPath; got != "/images" {
+		t.Fatalf("images_path = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidImagesPath(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+	}{
+		{
+			name: "relative path",
+			provider: `{
+        "type": "openai-compatible",
+        "base_url": "https://example.test/v1",
+        "api_key_env": "UPSTREAM_KEY",
+        "images_path": "images"
+      }`,
+		},
+		{
+			name: "whitespace",
+			provider: `{
+        "type": "openai-compatible",
+        "base_url": "https://example.test/v1",
+        "api_key_env": "UPSTREAM_KEY",
+        "images_path": "/im ages"
+      }`,
+		},
+		{
+			name: "codex provider",
+			provider: `{
+        "type": "codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key_env": "UPSTREAM_KEY",
+        "images_path": "/images"
+      }`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeBaseKeysFile(t, dir)
+			path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
+  "providers": {"upstream": `+tc.provider+`},
+  "models": {"image": {"provider": "upstream", "upstream": "img"}}
+}`)
+			t.Setenv("PROXY_KEY", "secret")
+			t.Setenv("UPSTREAM_KEY", "upstream")
+
+			if _, err := Load(path); err == nil {
+				t.Fatal("expected invalid images_path to be rejected")
+			}
+		})
+	}
+}

@@ -27,6 +27,11 @@ const DefaultResponsesPath = "/responses"
 // DefaultModelsPath is appended to the configured base URL for model listing.
 const DefaultModelsPath = "/models"
 
+// DefaultImagesPath is appended to the configured base URL for image
+// generation. Some APIs use a different path, such as OpenRouter's
+// "/images", so it is configurable per provider.
+const DefaultImagesPath = "/images/generations"
+
 // maxModelsBodyBytes caps how much of a model listing response is read.
 const maxModelsBodyBytes = 4 << 20
 
@@ -60,6 +65,10 @@ type Options struct {
 	// used when empty.
 	ModelsPath string
 
+	// ImagesPath is appended to BaseURL for image generation requests.
+	// DefaultImagesPath is used when empty.
+	ImagesPath string
+
 	// ModelsQuery is an optional raw query appended to the model listing URL,
 	// such as Codex's required client_version parameter.
 	ModelsQuery string
@@ -78,6 +87,7 @@ type Provider struct {
 	baseURL       string
 	path          string
 	responsesPath string
+	imagesPath    string
 	modelsPath    string
 	modelsQuery   string
 	usageURL      string
@@ -106,6 +116,7 @@ func New(opts Options) (*Provider, error) {
 
 	path := normalizePath(opts.Path, DefaultPath)
 	responsesPath := normalizePath(opts.ResponsesPath, DefaultResponsesPath)
+	imagesPath := normalizePath(opts.ImagesPath, DefaultImagesPath)
 	modelsPath := normalizePath(opts.ModelsPath, DefaultModelsPath)
 
 	headers := make(http.Header, len(opts.Headers))
@@ -130,6 +141,7 @@ func New(opts Options) (*Provider, error) {
 		baseURL:       strings.TrimRight(opts.BaseURL, "/"),
 		path:          path,
 		responsesPath: responsesPath,
+		imagesPath:    imagesPath,
 		modelsPath:    modelsPath,
 		modelsQuery:   strings.TrimPrefix(strings.TrimSpace(opts.ModelsQuery), "?"),
 		usageURL:      strings.TrimSpace(opts.UsageURL),
@@ -165,6 +177,12 @@ func (p *Provider) ChatCompletions(ctx context.Context, req provider.Request) (*
 
 func (p *Provider) Responses(ctx context.Context, req provider.Request) (*http.Response, error) {
 	return p.do(ctx, p.responsesPath, req)
+}
+
+// Images sends an OpenAI-compatible image generation request. The upstream
+// response is returned unmodified; image payloads are opaque to the proxy.
+func (p *Provider) Images(ctx context.Context, req provider.Request) (*http.Response, error) {
+	return p.do(ctx, p.imagesPath, req)
 }
 
 // Usage fetches subscription usage from the configured usage URL. The upstream

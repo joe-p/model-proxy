@@ -16,6 +16,8 @@ proxying at `/claude_sub/`.
   aliases for clients that hardcode OpenRouter's base URL.
 - `POST /v1/responses` for Responses-native clients such as Codex, streaming
   and non-streaming, with transparent response passthrough.
+- `POST /v1/images/generations` for OpenAI-compatible image generation,
+  including Open WebUI's image tool, with streaming response passthrough.
 - `GET /backend-api/wham/usage` for Codex subscription usage, forwarded through
   the configured `codex` provider and returned unchanged.
 - `/claude_sub/*` transparent Anthropic Messages API proxy for Claude Code
@@ -351,6 +353,12 @@ proxy appends `/chat/completions`, so `https://inference.phala.com/v1` becomes
 the same way; use its listener plus `/v1`, for example
 `http://gateway:8086/v1`.
 
+Image generation is appended the same way. It defaults to
+`/images/generations`; set `images_path` when the upstream differs. OpenRouter's
+dedicated Image API is served at `/api/v1/images`, so an OpenRouter provider
+uses `"images_path": "/images"`. `images_path` is not supported on `codex`
+providers.
+
 Private AI Gateway's ACI routing constraints are ordinary request-body fields.
 Set them through `extra_body`, for example:
 
@@ -651,7 +659,7 @@ working when the base URL points at the proxy.
 | Chat usage | `cost`, `is_byok`, and `cost_details` for API-billed providers |
 | Errors | `{"error":{"message","code":<int>,"type","metadata":{"provider_name","proxy_code"}}}`; upstream error bodies are rewritten |
 | Request fields | `models`, `route`, `plugins`, and `transforms` are dropped and logged as `dropped_fields` instead of rejected |
-| Paths | `/api/v1/chat/completions`, `/api/v1/responses`, and `/api/v1/models` serve the same handlers |
+| Paths | `/api/v1/chat/completions`, `/api/v1/responses`, `/api/v1/images`, `/api/v1/images/generations`, and `/api/v1/models` serve the same handlers |
 | CORS | `Access-Control-Allow-*` headers and `OPTIONS` preflight |
 
 Model metadata for the listing comes from the pricing catalog, keyed by the
@@ -735,6 +743,57 @@ top-level `usage` object of a non-streaming response:
 The response body is still forwarded byte-for-byte; only the log records these
 values. `cost_usd` is logged only if the upstream includes `usage.cost`.
 ChatGPT subscription responses normally report tokens but not a dollar cost.
+
+### Image generation
+
+`POST /v1/images/generations` and `/v1/images` (plus their `/api/v1` aliases)
+forward OpenAI-compatible image requests to the provider selected by the
+`model` field. `/images` matches OpenRouter's dedicated Image API path.
+Alias resolution, virtual-key authentication, policies, and `extra_body`
+merging work exactly as they do for chat models, so an image model must be
+listed under `models` or reachable through a provider with
+`passthrough_models` enabled.
+
+The request body is forwarded with only `model` rewritten. Fields such as
+`prompt`, `size`, `n`, `quality`, `response_format`, and provider-specific
+options are passed through untouched. Responses are streamed back byte-for-byte
+because image payloads are large.
+
+When `logging.log_usage` is enabled, the proxy observes the response's
+top-level `usage` object without buffering the image data and logs
+`prompt_tokens`, `completion_tokens`, and `total_tokens`. Both usage shapes are
+understood: OpenRouter's `prompt_tokens`/`completion_tokens` (with `cost`) and
+the OpenAI images API's `input_tokens`/`output_tokens`. A provider-reported
+`cost` is logged as `cost_usd`; otherwise the usual pricing estimate can add
+`estimated_api_cost_usd` and `pricing_source`. The response body itself is
+never rewritten.
+
+Bodies that are not JSON, such as streamed image responses, are still forwarded
+unchanged, but usage is not extracted from SSE events. Upstream errors use the
+same envelope as other endpoints.
+
+The upstream path defaults to `<base_url>/images/generations`. Override it per
+provider with `images_path`; OpenRouter's Image API, for example, lives at
+`/api/v1/images`:
+
+```jsonc
+"openrouter": {
+  "base_url": "https://openrouter.ai/api/v1",
+  "images_path": "/images"
+}
+```
+
+For Open WebUI, open Admin Settings → Images, choose the OpenAI engine, and set:
+
+- **API Base URL**: the proxy root including `/v1`, for example
+  `http://127.0.0.1:8080/v1`.
+- **API Key**: a configured virtual key.
+- **Model**: an image alias from `models`.
+
+Open WebUI sends `POST <API Base URL>/images/generations`, which the proxy
+serves as `/v1/images/generations`. Base64 image references in the request
+count toward `server.max_body_bytes`; raise that limit if editing requests
+exceed the default 1 MiB.
 
 ### Pricing estimates
 
