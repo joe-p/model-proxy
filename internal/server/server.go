@@ -146,6 +146,7 @@ func New(cfg *config.Config, providers map[string]provider.Provider, logger *slo
 		// upstream path is configured per provider.
 		s.mux.HandleFunc(prefix+"/images", s.handleImagesGenerations)
 		s.mux.HandleFunc(prefix+"/images/generations", s.handleImagesGenerations)
+		s.mux.HandleFunc(prefix+"/images/edits", s.handleImagesEdits)
 		s.mux.HandleFunc(prefix+"/models", s.handleModels)
 	}
 	// Codex clients and usage extensions expect ChatGPT's usage path. The

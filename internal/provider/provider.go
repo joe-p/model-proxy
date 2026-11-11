@@ -11,10 +11,13 @@ import (
 type Request struct {
 	UpstreamModel string
 	Body          []byte
-	Stream        bool
-	Accept        string
-	RequestID     string
-	Query         string
+	// ContentType overrides the default application/json request content type,
+	// for example a multipart boundary for image edits.
+	ContentType string
+	Stream      bool
+	Accept      string
+	RequestID   string
+	Query       string
 }
 
 // ProxyRequest is a request forwarded to an upstream API without translation.
@@ -41,6 +44,13 @@ type Provider interface {
 // these providers and reports a configuration error for the others.
 type ImagesProvider interface {
 	Images(ctx context.Context, req Request) (*http.Response, error)
+}
+
+// ImageEditor is implemented by providers that accept OpenAI-style multipart
+// image edit requests. Providers whose image API only takes JSON (such as
+// OpenRouter) translate edits into an Images request instead.
+type ImageEditor interface {
+	ImagesEdit(ctx context.Context, req Request) (*http.Response, error)
 }
 
 // ModelLister is implemented by providers that can enumerate the models they

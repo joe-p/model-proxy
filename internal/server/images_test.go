@@ -299,3 +299,24 @@ func TestImagesGenerationsForwardsNonJSONBody(t *testing.T) {
 		t.Fatalf("body changed:\nwant %q\ngot  %q", responseBody, gotBody)
 	}
 }
+
+func TestImagesGenerationsUsesImageBodyLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1,"data":[]}`))
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxyWithProvider(t, upstream.URL, "openai-compatible", func(cfg *config.Config) {
+		cfg.Server.MaxBodyBytes = 16
+		cfg.Server.MaxImageBodyBytes = 1 << 20
+		cfg.Models["image"] = config.ModelConfig{Alias: "image", Provider: "phala", Upstream: "img"}
+	})
+
+	body := `{"model":"image","prompt":"` + strings.Repeat("x", 32) + `"}`
+	resp := postImages(t, proxy.URL, "test-key", "/v1/images/generations", body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+}

@@ -16,6 +16,8 @@
   "server": {
     "listen": "127.0.0.1:8080",
     "max_body_bytes": 1048576,
+    // Image generation and edit bodies carry base64 images or multipart files.
+    "max_image_body_bytes": 26214400,
     "read_header_timeout": "10s",
     "shutdown_timeout": "15s"
 
@@ -104,6 +106,10 @@
       // "/images/generations" (OpenAI). OpenRouter's dedicated Image API is
       // served at "/images" under its /api/v1 base URL.
       "images_path": "/images",
+
+      // Image edits default to multipart POST /images/edits. OpenRouter takes
+      // JSON with base64 input_references on the images path instead.
+      "images_edit_format": "input_references",
 
       // Optional defaults injected into every upstream request body for models
       // using this provider. These are body fields, not HTTP headers.

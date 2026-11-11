@@ -31,8 +31,12 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen            string
-	MaxBodyBytes      int64
+	Listen string
+	// MaxBodyBytes bounds chat, Responses, and Claude requests.
+	MaxBodyBytes int64
+	// MaxImageBodyBytes bounds image generation and edit requests, which carry
+	// base64 images or multipart uploads and are much larger than text bodies.
+	MaxImageBodyBytes int64
 	ReadHeaderTimeout time.Duration
 	ShutdownTimeout   time.Duration
 
@@ -103,6 +107,14 @@ const (
 	PolicyBlacklist = "blacklist"
 )
 
+// Image edit request formats. Multipart is the OpenAI images API shape;
+// input_references is OpenRouter's JSON shape, where uploaded images become
+// base64 data URLs on the images endpoint.
+const (
+	ImagesEditMultipart       = "multipart"
+	ImagesEditInputReferences = "input_references"
+)
+
 // PolicyConfig restricts which model aliases a virtual key may use. Models is
 // the set of aliases named by the policy; Mode determines whether that set is
 // allowed (whitelist) or denied (blacklist).
@@ -134,6 +146,7 @@ type ProviderConfig struct {
 	Type                  string
 	BaseURL               string
 	ImagesPath            string
+	ImagesEditFormat      string
 	APIKey                string
 	AuthDir               string
 	BillingMode           string

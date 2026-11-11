@@ -25,6 +25,7 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 	cfg.Server = ServerConfig{
 		Listen:            "127.0.0.1:8080",
 		MaxBodyBytes:      1 << 20,
+		MaxImageBodyBytes: 25 << 20,
 		ReadHeaderTimeout: 10 * time.Second,
 		ShutdownTimeout:   15 * time.Second,
 	}
@@ -39,6 +40,12 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 	}
 	if cfg.Server.MaxBodyBytes <= 0 {
 		return nil, fmt.Errorf("server.max_body_bytes must be positive")
+	}
+	if raw.Server.MaxImageBodyBytes != nil {
+		cfg.Server.MaxImageBodyBytes = *raw.Server.MaxImageBodyBytes
+	}
+	if cfg.Server.MaxImageBodyBytes <= 0 {
+		return nil, fmt.Errorf("server.max_image_body_bytes must be positive")
 	}
 	var err error
 	cfg.Server.ReadHeaderTimeout, err = parseDuration(raw.Server.ReadHeaderTimeout, 10*time.Second, "server.read_header_timeout")
@@ -163,6 +170,17 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			return nil, err
 		}
 
+		imagesEditFormat := strings.ToLower(strings.TrimSpace(rawProvider.ImagesEditFormat))
+		if imagesEditFormat == "" {
+			imagesEditFormat = ImagesEditMultipart
+		}
+		if imagesEditFormat != ImagesEditMultipart && imagesEditFormat != ImagesEditInputReferences {
+			return nil, fmt.Errorf("provider %q: images_edit_format must be %q or %q", name, ImagesEditMultipart, ImagesEditInputReferences)
+		}
+		if imagesEditFormat == ImagesEditInputReferences && codexProvider {
+			return nil, fmt.Errorf("provider %q: images_edit_format is not supported for codex providers", name)
+		}
+
 		imagesPath := strings.TrimSpace(rawProvider.ImagesPath)
 		if imagesPath != "" {
 			if codexProvider {
@@ -210,6 +228,7 @@ func resolve(envPath, configDir string, raw rawConfig, dotenv map[string]string)
 			Type:                  providerType,
 			BaseURL:               baseURL,
 			ImagesPath:            imagesPath,
+			ImagesEditFormat:      imagesEditFormat,
 			APIKey:                apiKey,
 			AuthDir:               authDir,
 			BillingMode:           billingMode,

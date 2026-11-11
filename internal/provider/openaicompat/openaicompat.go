@@ -32,6 +32,10 @@ const DefaultModelsPath = "/models"
 // "/images", so it is configurable per provider.
 const DefaultImagesPath = "/images/generations"
 
+// DefaultImagesEditPath is appended to the configured base URL for multipart
+// image edit requests.
+const DefaultImagesEditPath = "/images/edits"
+
 // maxModelsBodyBytes caps how much of a model listing response is read.
 const maxModelsBodyBytes = 4 << 20
 
@@ -185,6 +189,12 @@ func (p *Provider) Images(ctx context.Context, req provider.Request) (*http.Resp
 	return p.do(ctx, p.imagesPath, req)
 }
 
+// ImagesEdit sends an OpenAI-compatible multipart image edit request. The
+// server supplies a body whose Content-Type carries the multipart boundary.
+func (p *Provider) ImagesEdit(ctx context.Context, req provider.Request) (*http.Response, error) {
+	return p.do(ctx, DefaultImagesEditPath, req)
+}
+
 // Usage fetches subscription usage from the configured usage URL. The upstream
 // response is returned unmodified; the server decides how to expose it.
 func (p *Provider) Usage(ctx context.Context) (*http.Response, error) {
@@ -231,7 +241,11 @@ func (p *Provider) do(ctx context.Context, path string, req provider.Request) (*
 		return nil, err
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
+	contentType := req.ContentType
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	httpReq.Header.Set("Content-Type", contentType)
 	if req.Accept != "" {
 		httpReq.Header.Set("Accept", req.Accept)
 	} else if req.Stream {

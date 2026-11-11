@@ -16,8 +16,9 @@ proxying at `/claude_sub/`.
   aliases for clients that hardcode OpenRouter's base URL.
 - `POST /v1/responses` for Responses-native clients such as Codex, streaming
   and non-streaming, with transparent response passthrough.
-- `POST /v1/images/generations` for OpenAI-compatible image generation,
-  including Open WebUI's image tool, with streaming response passthrough.
+- `POST /v1/images/generations` and `POST /v1/images/edits` for
+  OpenAI-compatible image generation and editing, including Open WebUI's image
+  tools, with streaming response passthrough and usage/cost logging.
 - `GET /backend-api/wham/usage` for Codex subscription usage, forwarded through
   the configured `codex` provider and returned unchanged.
 - `/claude_sub/*` transparent Anthropic Messages API proxy for Claude Code
@@ -119,6 +120,8 @@ attribution headers, and a Private AI Gateway provider with ACI constraints.
   "server": {
     "listen": "127.0.0.1:8080",
     "max_body_bytes": 1048576,
+    // Image generation/editing bodies carry base64 images or multipart files.
+    "max_image_body_bytes": 26214400,
     "read_header_timeout": "10s",
     "shutdown_timeout": "15s",
   },
@@ -358,6 +361,21 @@ Image generation is appended the same way. It defaults to
 dedicated Image API is served at `/api/v1/images`, so an OpenRouter provider
 uses `"images_path": "/images"`. `images_path` is not supported on `codex`
 providers.
+
+Image edits default to multipart `POST <base_url>/images/edits`. Set
+`images_edit_format` to `"input_references"` for APIs that accept a JSON body
+with base64 data URLs instead, such as OpenRouter. In that mode edits are sent
+to `images_path`, so OpenRouter needs:
+
+```jsonc
+"openrouter": {
+  "images_path": "/images",
+  "images_edit_format": "input_references"
+}
+```
+
+`images_edit_format` accepts `"multipart"` (default) or
+`"input_references"` and is not supported on `codex` providers.
 
 Private AI Gateway's ACI routing constraints are ordinary request-body fields.
 Set them through `extra_body`, for example:
@@ -791,9 +809,36 @@ For Open WebUI, open Admin Settings → Images, choose the OpenAI engine, and se
 - **Model**: an image alias from `models`.
 
 Open WebUI sends `POST <API Base URL>/images/generations`, which the proxy
-serves as `/v1/images/generations`. Base64 image references in the request
-count toward `server.max_body_bytes`; raise that limit if editing requests
-exceed the default 1 MiB.
+serves as `/v1/images/generations`. Image editing uses the separate
+`IMAGES_EDIT_OPENAI_API_BASE_URL` / `IMAGES_EDIT_OPENAI_API_KEY` /
+`IMAGE_EDIT_MODEL` settings and posts to `/images/edits`; point those at the
+proxy and the same `openrouter/<slug>` model. Image requests use
+`server.max_image_body_bytes` (25 MiB by default) instead of the smaller
+`max_body_bytes` used for text requests.
+
+### Image edits
+
+`POST /v1/images/edits` (and `/api/v1/images/edits`) accepts the multipart form
+that OpenAI clients and Open WebUI send. The `model` field is resolved through
+the same alias and policy machinery as every other endpoint.
+
+Two upstream shapes are supported, selected by the provider's
+`images_edit_format`:
+
+- `multipart` (default): the form is forwarded to
+  `<base_url>/images/edits` with only `model` rewritten and `extra_body`
+  merged. Uploaded file parts keep their filename and content type.
+- `input_references`: the form is converted to a JSON request for
+  `<base_url><images_path>`. File parts become `input_references` entries with
+  `data:<content-type>;base64,...` URLs, `n` is sent as a number, and
+  `response_format` is dropped because these APIs always return base64. This
+  is the shape OpenRouter's Image API expects. Masks are rejected in this
+  mode.
+
+Responses use the same streaming passthrough and usage/cost logging as image
+generation, so edits through either shape add `prompt_tokens`,
+`completion_tokens`, `total_tokens`, and `cost_usd` (or
+`estimated_api_cost_usd`) to the access log.
 
 ### Pricing estimates
 
@@ -870,7 +915,8 @@ the amount charged to a subscription.
 | Malformed JSON | 400 | `invalid_request` |
 | Unlisted model with several passthrough providers | 400 | `invalid_request` |
 | Model prefixed with a provider that disallows passthrough | 400 | `invalid_request` |
-| Body over `max_body_bytes` | 413 | `request_too_large` |
+| Body over `max_body_bytes` (or `max_image_body_bytes` for images) | 413 | `request_too_large` |
+| Image edit mask with `input_references` format | 400 | `invalid_request` |
 | Upstream unreachable | 502 | `upstream_unavailable` |
 | Upstream response-header timeout | 504 | `upstream_timeout` |
 | Unexpected internal failure | 500 | `internal_error` |

@@ -29,6 +29,7 @@ type rawServer struct {
 	AdminListen       *string `json:"admin_listen"`
 	AdminTokenEnv     *string `json:"admin_token_env"`
 	MaxBodyBytes      *int64  `json:"max_body_bytes"`
+	MaxImageBodyBytes *int64  `json:"max_image_body_bytes"`
 	ReadHeaderTimeout *string `json:"read_header_timeout"`
 	ShutdownTimeout   *string `json:"shutdown_timeout"`
 }
@@ -70,6 +71,7 @@ type rawProvider struct {
 	Type                  string         `json:"type"`
 	BaseURL               string         `json:"base_url"`
 	ImagesPath            string         `json:"images_path"`
+	ImagesEditFormat      string         `json:"images_edit_format"`
 	APIKeyEnv             string         `json:"api_key_env"`
 	AuthDir               string         `json:"auth_dir"`
 	BillingMode           string         `json:"billing_mode"`

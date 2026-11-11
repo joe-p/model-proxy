@@ -92,6 +92,9 @@ func TestLoadDefaultsAndEnvPrecedence(t *testing.T) {
 	if cfg.Server.Listen != "127.0.0.1:8080" || cfg.Server.MaxBodyBytes != 1<<20 {
 		t.Fatalf("unexpected server defaults: %+v", cfg.Server)
 	}
+	if cfg.Server.MaxImageBodyBytes != 25<<20 {
+		t.Fatalf("unexpected image body default: %+v", cfg.Server)
+	}
 	if cfg.Server.ReadHeaderTimeout != 10*time.Second || cfg.Server.ShutdownTimeout != 15*time.Second {
 		t.Fatalf("unexpected timeout defaults: %+v", cfg.Server)
 	}
@@ -1492,5 +1495,100 @@ func TestLoadRejectsInvalidImagesPath(t *testing.T) {
 				t.Fatal("expected invalid images_path to be rejected")
 			}
 		})
+	}
+}
+
+func TestLoadResolvesImageSettings(t *testing.T) {
+	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
+  "server": {"max_image_body_bytes": 4194304},
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY",
+      "images_path": "/images",
+      "images_edit_format": "input_references"
+    }
+  },
+  "models": {
+    "image": {"provider": "openrouter", "upstream": "openai/gpt-image-1"}
+  }
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.MaxImageBodyBytes != 4194304 {
+		t.Fatalf("max_image_body_bytes = %d", cfg.Server.MaxImageBodyBytes)
+	}
+	providerCfg := cfg.Providers["openrouter"]
+	if providerCfg.ImagesPath != "/images" || providerCfg.ImagesEditFormat != ImagesEditInputReferences {
+		t.Fatalf("unexpected image settings: %+v", providerCfg)
+	}
+}
+
+func TestLoadDefaultsImagesEditFormatToMultipart(t *testing.T) {
+	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := cfg.Providers["openrouter"].ImagesEditFormat; got != ImagesEditMultipart {
+		t.Fatalf("images_edit_format = %q", got)
+	}
+}
+
+func TestLoadRejectsInvalidImagesEditFormat(t *testing.T) {
+	dir := t.TempDir()
+	writeBaseKeysFile(t, dir)
+	path := writeFile(t, dir, "config.json", `{
+  "key_file": "keys.json",
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_KEY",
+      "images_edit_format": "form"
+    }
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("PROXY_KEY", "secret")
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected invalid images_edit_format to be rejected")
+	}
+}
+
+func TestLoadRejectsNonPositiveImageBodyBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.json", `{
+  "server": {"max_image_body_bytes": 0},
+  "auth": {"enabled": false},
+  "providers": {
+    "openrouter": {"base_url": "https://openrouter.ai/api/v1", "api_key_env": "OPENROUTER_KEY"}
+  },
+  "models": {"fast": {"provider": "openrouter", "upstream": "openai/gpt-4o-mini"}}
+}`)
+	t.Setenv("OPENROUTER_KEY", "upstream")
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected max_image_body_bytes 0 to be rejected")
 	}
 }

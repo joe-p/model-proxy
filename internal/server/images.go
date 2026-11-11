@@ -34,7 +34,7 @@ func (s *Server) handleImagesGenerations(w http.ResponseWriter, r *http.Request)
 	}
 	logKey(lr, cfg, key)
 
-	body, err := readRequestBody(w, r, cfg.Server.MaxBodyBytes)
+	body, err := readRequestBody(w, r, imageBodyLimit(cfg))
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
@@ -147,7 +147,21 @@ func (s *Server) handleImagesGenerations(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer resp.Body.Close()
+	s.writeImageResponse(w, r, st, lr, model, resp)
+}
 
+// imageBodyLimit returns the body cap for image generation and edit requests.
+// Directly constructed configs in tests may leave the image limit unset.
+func imageBodyLimit(cfg *config.Config) int64 {
+	if cfg.Server.MaxImageBodyBytes > 0 {
+		return cfg.Server.MaxImageBodyBytes
+	}
+	return cfg.Server.MaxBodyBytes
+}
+
+// writeImageResponse forwards an upstream image response unchanged and records
+// usage and cost for the access log.
+func (s *Server) writeImageResponse(w http.ResponseWriter, r *http.Request, st *state, lr *requestLog, model config.ModelConfig, resp *http.Response) {
 	w.Header().Set("X-Model-Proxy-Alias", model.Alias)
 	w.Header().Set("X-Model-Proxy-Upstream", model.Upstream)
 	copyResponseHeaders(w.Header(), resp.Header)
@@ -170,7 +184,7 @@ func (s *Server) handleImagesGenerations(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(resp.StatusCode)
 
 	var copyErr error
-	lr.usage, copyErr = copyImageJSON(w, resp.Body, cfg.Logging.LogUsage)
+	lr.usage, copyErr = copyImageJSON(w, resp.Body, st.cfg.Logging.LogUsage)
 	if copyErr != nil && r.Context().Err() == nil {
 		lr.errorDetail = copyErr.Error()
 	}
