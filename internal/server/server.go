@@ -44,6 +44,12 @@ const (
 	// upstream is asked again. Failures are cached for the same period so a
 	// broken upstream is not probed on every /v1/models call.
 	modelDiscoveryTTL = time.Minute
+	// modelEndpointsTimeout bounds a single per-model endpoint lookup.
+	modelEndpointsTimeout = 5 * time.Second
+	// modelEndpointsTTL is how long endpoint limits are reused.
+	modelEndpointsTTL = time.Hour
+	// modelEndpointsFailureTTL retries a failed lookup sooner than a success.
+	modelEndpointsFailureTTL = time.Minute
 )
 
 type discoveredModels struct {
@@ -83,6 +89,44 @@ func (c *modelsCache) clear() {
 	c.entries = nil
 }
 
+type endpointList struct {
+	endpoints []provider.Endpoint
+	expires   time.Time
+}
+
+// endpointsCache holds per-model serving options reported by providers such as
+// OpenRouter. It is keyed by provider name and upstream model id and cleared
+// whenever the configuration reloads.
+type endpointsCache struct {
+	mu      sync.Mutex
+	entries map[string]endpointList
+}
+
+func (c *endpointsCache) get(key string) ([]provider.Endpoint, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok || time.Now().After(entry.expires) {
+		return nil, false
+	}
+	return entry.endpoints, true
+}
+
+func (c *endpointsCache) put(key string, endpoints []provider.Endpoint, ttl time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries = make(map[string]endpointList)
+	}
+	c.entries[key] = endpointList{endpoints: endpoints, expires: time.Now().Add(ttl)}
+}
+
+func (c *endpointsCache) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = nil
+}
+
 type Server struct {
 	state        atomic.Pointer[state]
 	mux          *http.ServeMux
@@ -94,6 +138,7 @@ type Server struct {
 	reloadMu     sync.Mutex
 	reloadInfo   reloadRecord
 	models       modelsCache
+	endpoints    endpointsCache
 	options      []Option
 }
 
@@ -122,6 +167,33 @@ func (s *Server) passthroughModels(ctx context.Context, st *state, providerName 
 	st.logger.Debug("model discovery succeeded", "provider", providerName, "models", len(ids))
 	s.models.put(providerName, ids)
 	return ids
+}
+
+// modelEndpoints returns the per-endpoint serving options for a model,
+// consulting the cache first. Failures are cached briefly and reported as
+// unavailable so callers keep their existing metadata.
+func (s *Server) modelEndpoints(ctx context.Context, st *state, providerName, upstream string) ([]provider.Endpoint, bool) {
+	key := providerName + "\x00" + upstream
+	if endpoints, ok := s.endpoints.get(key); ok {
+		return endpoints, len(endpoints) > 0
+	}
+
+	lister, ok := st.providers[providerName].(provider.EndpointLister)
+	if !ok {
+		s.endpoints.put(key, nil, modelEndpointsFailureTTL)
+		return nil, false
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, modelEndpointsTimeout)
+	defer cancel()
+	endpoints, err := lister.ModelEndpoints(lookupCtx, upstream)
+	if err != nil {
+		st.logger.Warn("model endpoint lookup failed", "provider", providerName, "model", upstream, "error", err)
+		s.endpoints.put(key, nil, modelEndpointsFailureTTL)
+		return nil, false
+	}
+	s.endpoints.put(key, endpoints, modelEndpointsTTL)
+	return endpoints, len(endpoints) > 0
 }
 
 func New(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger, pricingSvc CostEstimator, options ...Option) *Server {
@@ -264,6 +336,7 @@ func (s *Server) Reload(cfg *config.Config, providers map[string]provider.Provid
 		logger = old.logger
 	}
 	s.models.clear()
+	s.endpoints.clear()
 	s.state.Store(newState(cfg, providers, logger, pricingSvc, s.options))
 	return nil
 }

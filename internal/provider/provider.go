@@ -60,6 +60,23 @@ type ModelLister interface {
 	Models(ctx context.Context) ([]string, error)
 }
 
+// Endpoint describes one serving option for a model, as reported by an
+// upstream that routes a model to multiple providers.
+type Endpoint struct {
+	Tag                 string
+	ProviderName        string
+	MaxCompletionTokens *int64
+	// Status is the upstream availability marker; negative values mark
+	// disabled endpoints.
+	Status int
+}
+
+// EndpointLister is implemented by providers that report per-endpoint limits
+// for a model, such as OpenRouter.
+type EndpointLister interface {
+	ModelEndpoints(ctx context.Context, modelID string) ([]Endpoint, error)
+}
+
 // UsageProvider is implemented by providers that expose subscription usage
 // information. The server uses it for the Codex usage passthrough endpoint.
 type UsageProvider interface {

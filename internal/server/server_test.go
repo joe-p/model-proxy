@@ -1288,6 +1288,10 @@ func TestUnknownModelWithoutPassthroughIs404(t *testing.T) {
 func TestModelsListsDiscoveredPassthroughModels(t *testing.T) {
 	var discoveryCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/endpoints") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if r.URL.Path != "/models" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -1564,6 +1568,126 @@ func TestModelsOpenRouterShapeUsesCatalogMetadata(t *testing.T) {
 	for _, want := range []string{"tools", "reasoning", "reasoning_effort", "temperature", "max_completion_tokens"} {
 		if !strings.Contains(params, want) {
 			t.Fatalf("supported_parameters missing %q: %s", want, params)
+		}
+	}
+}
+
+func TestModelsOpenRouterUsesConservativeEndpointLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/models/openai/gpt-4o-mini/endpoints":
+			_, _ = w.Write([]byte(`{"data":{"endpoints":[
+				{"tag":"wafer/mxfp4","max_completion_tokens":943718,"status":0},
+				{"tag":"together","max_completion_tokens":393216,"status":0},
+				{"tag":"inference-net/fp8","max_completion_tokens":393216,"status":0},
+				{"tag":"unlisted","max_completion_tokens":1000,"status":0},
+				{"tag":"together","max_completion_tokens":null,"status":0},
+				{"tag":"wafer/mxfp4","max_completion_tokens":1,"status":-2}
+			]}}`))
+		case "/models/anthropic/claude-sonnet-4/endpoints":
+			_, _ = w.Write([]byte(`{"data":{"endpoints":[
+				{"tag":"a","max_completion_tokens":943718,"status":0},
+				{"tag":"b","max_completion_tokens":262144,"status":0},
+				{"tag":"c","max_completion_tokens":1000,"status":-2}
+			]}}`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxyWithPricing(t, upstream.URL, "openrouter", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["openrouter"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["openrouter"] = providerCfg
+
+		fast := cfg.Models["fast"]
+		fast.ExtraBody = map[string]json.RawMessage{
+			"provider": json.RawMessage(`{"order":["wafer/mxfp4","together","inference-net/fp8"],"allow_fallbacks":false}`),
+		}
+		cfg.Models["fast"] = fast
+	}, fakeCatalog{known: true, info: pricing.ModelInfo{
+		ContextLength:   1000000,
+		MaxOutputTokens: 999999,
+	}})
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data []struct {
+			ID          string `json:"id"`
+			TopProvider struct {
+				MaxCompletionTokens int64 `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+
+	got := make(map[string]int64, len(payload.Data))
+	for _, model := range payload.Data {
+		got[model.ID] = model.TopProvider.MaxCompletionTokens
+	}
+	// The ordered providers exclude the lower "unlisted" limit and the
+	// disabled endpoint; together and inference-net tie at 393216.
+	if got["fast"] != 393216 {
+		t.Fatalf("fast max_completion_tokens = %d, want 393216", got["fast"])
+	}
+	// Without an order, every available endpoint is considered.
+	if got["smart"] != 262144 {
+		t.Fatalf("smart max_completion_tokens = %d, want 262144", got["smart"])
+	}
+}
+
+func TestModelsOpenRouterFallsBackToCatalogWhenEndpointsFail(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer upstream.Close()
+
+	proxy, _ := newTestProxyWithPricing(t, upstream.URL, "openrouter", func(cfg *config.Config) {
+		providerCfg := cfg.Providers["openrouter"]
+		providerCfg.PricingProvider = "openai"
+		cfg.Providers["openrouter"] = providerCfg
+	}, fakeCatalog{known: true, info: pricing.ModelInfo{
+		ContextLength:   1000000,
+		MaxOutputTokens: 943718,
+	}})
+
+	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET models: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var payload struct {
+		Data []struct {
+			ID          string `json:"id"`
+			TopProvider struct {
+				MaxCompletionTokens int64 `json:"max_completion_tokens"`
+			} `json:"top_provider"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatalf("decode models: %v", err)
+	}
+	if len(payload.Data) != 2 {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+	for _, model := range payload.Data {
+		if model.TopProvider.MaxCompletionTokens != 943718 {
+			t.Fatalf("%s max_completion_tokens = %d, want catalog 943718", model.ID, model.TopProvider.MaxCompletionTokens)
 		}
 	}
 }

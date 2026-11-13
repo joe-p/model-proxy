@@ -42,7 +42,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	entries := s.modelEntries(r.Context(), st, key)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(s.modelsPayload(st, entries)); err != nil {
+	if err := json.NewEncoder(w).Encode(s.modelsPayload(r.Context(), st, entries)); err != nil {
 		lr.errorDetail = err.Error()
 	}
 }

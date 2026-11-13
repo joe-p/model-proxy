@@ -59,6 +59,42 @@ func TestModelsParsesOpenAIShape(t *testing.T) {
 	}
 }
 
+func TestModelEndpointsParsesOpenRouterShape(t *testing.T) {
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"endpoints":[
+			{"tag":"wafer/mxfp4","provider_name":"Wafer","max_completion_tokens":943718,"status":0},
+			{"tag":"disabled","provider_name":"Disabled","max_completion_tokens":null,"status":-2}
+		]}}`))
+	}))
+	defer upstream.Close()
+
+	p := newProvider(t, openaicompat.Options{BaseURL: upstream.URL + "/v1"})
+	endpoints, err := p.ModelEndpoints(context.Background(), "deepseek/deepseek-v4.1-flash-1017")
+	if err != nil {
+		t.Fatalf("ModelEndpoints: %v", err)
+	}
+	if gotPath != "/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer upstream-key" {
+		t.Fatalf("authorization = %q", gotAuth)
+	}
+	if len(endpoints) != 2 {
+		t.Fatalf("endpoints = %+v", endpoints)
+	}
+	first := endpoints[0]
+	if first.Tag != "wafer/mxfp4" || first.ProviderName != "Wafer" || first.MaxCompletionTokens == nil || *first.MaxCompletionTokens != 943718 {
+		t.Fatalf("first endpoint = %+v", first)
+	}
+	if endpoints[1].MaxCompletionTokens != nil || endpoints[1].Status != -2 {
+		t.Fatalf("second endpoint = %+v", endpoints[1])
+	}
+}
+
 func TestModelsParsesCodexShapeWithQuery(t *testing.T) {
 	var gotPath string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

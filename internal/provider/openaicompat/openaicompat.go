@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -350,6 +351,84 @@ func (p *Provider) Models(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("parse upstream model listing: %w", err)
 	}
 	return ids, nil
+}
+
+// ModelEndpoints fetches the serving options for one model. OpenRouter exposes
+// them as GET /models/<id>/endpoints with a {"data":{"endpoints":[...]}}
+// envelope; other OpenAI-compatible providers return 404, which the server
+// treats as "no endpoint metadata".
+func (p *Provider) ModelEndpoints(ctx context.Context, modelID string) ([]provider.Endpoint, error) {
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		return nil, errors.New("model id must not be empty")
+	}
+	endpoint := p.baseURL + p.modelsPath + "/" + escapeModelPath(modelID) + "/endpoints"
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
+	}
+	httpReq.Header.Set("Accept", "application/json")
+	if err := p.authorize(ctx, httpReq); err != nil {
+		return nil, err
+	}
+
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		kind := provider.Unavailable
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() || errors.Is(err, context.DeadlineExceeded) {
+			kind = provider.Timeout
+		}
+		return nil, &provider.Error{Kind: kind, Err: err}
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxModelsBodyBytes))
+	if err != nil {
+		return nil, &provider.Error{Kind: provider.Unavailable, Err: err}
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upstream endpoints returned %d: %s", resp.StatusCode, snippet(body))
+	}
+
+	var payload struct {
+		Data struct {
+			Endpoints []struct {
+				Tag                 string `json:"tag"`
+				ProviderName        string `json:"provider_name"`
+				MaxCompletionTokens *int64 `json:"max_completion_tokens"`
+				Status              int    `json:"status"`
+			} `json:"endpoints"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("parse upstream endpoints: %w", err)
+	}
+
+	endpoints := make([]provider.Endpoint, 0, len(payload.Data.Endpoints))
+	for _, entry := range payload.Data.Endpoints {
+		endpoints = append(endpoints, provider.Endpoint{
+			Tag:                 entry.Tag,
+			ProviderName:        entry.ProviderName,
+			MaxCompletionTokens: entry.MaxCompletionTokens,
+			Status:              entry.Status,
+		})
+	}
+	return endpoints, nil
+}
+
+// escapeModelPath escapes each segment of a slash-separated model id while
+// leaving the separators intact, matching the upstream route.
+func escapeModelPath(modelID string) string {
+	parts := strings.Split(modelID, "/")
+	for i := range parts {
+		parts[i] = url.PathEscape(parts[i])
+	}
+	return strings.Join(parts, "/")
 }
 
 func parseModelIDs(body []byte) ([]string, error) {

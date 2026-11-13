@@ -691,6 +691,15 @@ plan has no per-token list price; catalog rates still feed access-log estimates.
 and reasoning parameters only when the catalog confirms them, and omits
 `temperature`/`top_p`/`seed` for Codex-style backends that reject them.
 
+For `type: "openrouter"` providers, `top_provider.max_completion_tokens` is
+narrowed to the smallest limit among the model's available upstream endpoints
+(`GET <base_url>/models/<id>/endpoints`) instead of being copied from the
+catalog. When `extra_body` sets `provider.order` (or a legacy top-level
+`order`), only endpoints whose tag matches an ordered provider are considered;
+the most conservative matching value wins. Disabled endpoints and null limits
+are ignored. Endpoint lookups are cached for one hour, and a failed lookup
+keeps the catalog value.
+
 Cost injection follows the billing mode:
 
 - **Provider reported a cost** (OpenRouter): the reported `usage.cost` and

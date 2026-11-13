@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/joe-p/model-proxy/internal/config"
 	"github.com/joe-p/model-proxy/internal/openroutercompat"
 	"github.com/joe-p/model-proxy/internal/pricing"
+	"github.com/joe-p/model-proxy/internal/provider"
 )
 
 // openRouterClientFields are OpenRouter request fields that would bypass the
@@ -54,8 +56,8 @@ func writeUpstreamError(w http.ResponseWriter, resp *http.Response, providerName
 }
 
 // modelsPayload renders the model list in OpenRouter's shape.
-func (s *Server) modelsPayload(st *state, entries []modelEntry) any {
-	return openRouterModelList(st, entries, s.startedAt.Unix())
+func (s *Server) modelsPayload(ctx context.Context, st *state, entries []modelEntry) any {
+	return s.openRouterModelList(ctx, st, entries, s.startedAt.Unix())
 }
 
 // modelEntry is one model id the proxy exposes, with the metadata needed to
@@ -66,6 +68,7 @@ type modelEntry struct {
 	Provider    string
 	Upstream    string
 	Passthrough bool
+	ExtraBody   map[string]json.RawMessage
 	Pricing     *config.ModelPricing
 }
 
@@ -82,11 +85,12 @@ func (s *Server) modelEntries(ctx context.Context, st *state, key *config.Virtua
 		}
 		seen[alias] = struct{}{}
 		entries = append(entries, modelEntry{
-			ID:       alias,
-			Name:     alias,
-			Provider: model.Provider,
-			Upstream: model.Upstream,
-			Pricing:  model.Pricing,
+			ID:        alias,
+			Name:      alias,
+			Provider:  model.Provider,
+			Upstream:  model.Upstream,
+			ExtraBody: model.ExtraBody,
+			Pricing:   model.Pricing,
 		})
 	}
 
@@ -110,6 +114,7 @@ func (s *Server) modelEntries(ctx context.Context, st *state, key *config.Virtua
 				Provider:    providerName,
 				Upstream:    id,
 				Passthrough: true,
+				ExtraBody:   st.cfg.Providers[providerName].ExtraBody,
 			})
 		}
 	}
@@ -171,8 +176,11 @@ type openRouterTopProv struct {
 
 // openRouterModelList renders the entries as an OpenRouter /models payload.
 // Metadata comes from the pricing catalog, with explicit config pricing winning.
-func openRouterModelList(st *state, entries []modelEntry, created int64) map[string]any {
+// OpenRouter models additionally use the smallest output limit among the
+// endpoints a request may route to.
+func (s *Server) openRouterModelList(ctx context.Context, st *state, entries []modelEntry, created int64) map[string]any {
 	catalog, _ := st.pricing.(modelCatalog)
+	endpointLimits := s.openRouterEndpointLimits(ctx, st, entries)
 
 	data := make([]openRouterModel, 0, len(entries))
 	for _, entry := range entries {
@@ -186,6 +194,11 @@ func openRouterModelList(st *state, entries []modelEntry, created int64) map[str
 
 		inputModalities := normalizeModalities(info.InputModalities, known, info.Attachment)
 		outputModalities := normalizeOutputModalities(info.OutputModalities)
+
+		maxOutputTokens := info.MaxOutputTokens
+		if limit, ok := endpointLimits[entry.ID]; ok {
+			maxOutputTokens = limit
+		}
 
 		model := openRouterModel{
 			ID:            entry.ID,
@@ -202,7 +215,7 @@ func openRouterModelList(st *state, entries []modelEntry, created int64) map[str
 			},
 			TopProvider: openRouterTopProv{
 				ContextLength:       info.ContextLength,
-				MaxCompletionTokens: info.MaxOutputTokens,
+				MaxCompletionTokens: maxOutputTokens,
 				IsModerated:         false,
 			},
 			SupportedParameters: supportedParameters(providerCfg.Type, info, known),
@@ -221,6 +234,105 @@ func openRouterModelList(st *state, entries []modelEntry, created int64) map[str
 	}
 
 	return map[string]any{"data": data, "total_count": len(data)}
+}
+
+// openRouterEndpointLimits looks up the conservative output limit for every
+// OpenRouter-backed entry. Lookups run concurrently because an OpenRouter
+// provider with passthrough models can expose a large catalog.
+func (s *Server) openRouterEndpointLimits(ctx context.Context, st *state, entries []modelEntry) map[string]int64 {
+	limits := make(map[string]int64)
+	type result struct {
+		id    string
+		limit int64
+	}
+
+	results := make(chan result, len(entries))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, entry := range entries {
+		if st.cfg.Providers[entry.Provider].Type != "openrouter" {
+			continue
+		}
+		wg.Add(1)
+		go func(entry modelEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			endpoints, ok := s.modelEndpoints(ctx, st, entry.Provider, entry.Upstream)
+			if !ok {
+				return
+			}
+			limit, ok := conservativeMaxCompletionTokens(endpoints, providerOrder(entry.ExtraBody))
+			if !ok {
+				return
+			}
+			results <- result{id: entry.ID, limit: limit}
+		}(entry)
+	}
+	wg.Wait()
+	close(results)
+	for item := range results {
+		limits[item.id] = item.limit
+	}
+	return limits
+}
+
+// providerOrder returns the requested provider slugs from extra_body. OpenRouter
+// nests routing preferences under "provider"; the top-level form is accepted
+// for older configurations.
+func providerOrder(extra map[string]json.RawMessage) []string {
+	if raw, ok := extra["provider"]; ok {
+		var preferences struct {
+			Order []string `json:"order"`
+		}
+		if err := json.Unmarshal(raw, &preferences); err == nil && len(preferences.Order) > 0 {
+			return preferences.Order
+		}
+	}
+	raw, ok := extra["order"]
+	if !ok {
+		return nil
+	}
+	var order []string
+	if err := json.Unmarshal(raw, &order); err != nil {
+		return nil
+	}
+	return order
+}
+
+// conservativeMaxCompletionTokens returns the smallest positive output limit
+// among available endpoints. When order is non-empty, endpoints not named in it
+// are ignored so the value reflects the providers the request may actually use.
+func conservativeMaxCompletionTokens(endpoints []provider.Endpoint, order []string) (int64, bool) {
+	allowed := make(map[string]struct{}, len(order))
+	for _, slug := range order {
+		slug = strings.ToLower(strings.TrimSpace(slug))
+		if slug != "" {
+			allowed[slug] = struct{}{}
+		}
+	}
+
+	var limit int64
+	found := false
+	for _, endpoint := range endpoints {
+		if endpoint.Status < 0 {
+			continue
+		}
+		if len(allowed) > 0 {
+			if _, ok := allowed[strings.ToLower(endpoint.Tag)]; !ok {
+				continue
+			}
+		}
+		if endpoint.MaxCompletionTokens == nil || *endpoint.MaxCompletionTokens <= 0 {
+			continue
+		}
+		if !found || *endpoint.MaxCompletionTokens < limit {
+			limit = *endpoint.MaxCompletionTokens
+			found = true
+		}
+	}
+	return limit, found
 }
 
 // openRouterPricingFor converts USD per million-token rates into OpenRouter's
