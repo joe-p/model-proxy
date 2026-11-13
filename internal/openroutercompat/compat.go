@@ -191,7 +191,7 @@ func marshalNumber(value float64) (json.RawMessage, error) {
 // envelope. providerName and status are exposed as metadata. Bodies that cannot
 // be parsed fall back to their text as the message.
 func NormalizeError(body []byte, providerName string, status int) []byte {
-	message := errorMessage(body)
+	message := ErrorMessage(body)
 	envelope := map[string]any{
 		"error": map[string]any{
 			"message": message,
@@ -209,8 +209,8 @@ func NormalizeError(body []byte, providerName string, status int) []byte {
 	return encoded
 }
 
-// errorMessage finds the most useful message in an upstream error body.
-func errorMessage(body []byte) string {
+// ErrorMessage finds the most useful message in an upstream error body.
+func ErrorMessage(body []byte) string {
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err == nil {
 		if nested, ok := objectField(payload["error"]); ok {

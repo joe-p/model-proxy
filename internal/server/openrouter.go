@@ -24,6 +24,10 @@ var openRouterClientFields = []string{"models", "route", "plugins", "transforms"
 // before it is rewritten into the OpenRouter error envelope.
 const maxUpstreamErrorBytes = 1 << 20
 
+// upstreamErrorDetailLimit caps the access-log text sampled from an upstream
+// error body.
+const upstreamErrorDetailLimit = 300
+
 // tolerateOpenRouterFields drops OpenRouter-only request fields that would
 // bypass the alias registry or add paid features, recording them for the access
 // log.
@@ -42,17 +46,31 @@ func tolerateOpenRouterFields(lr *requestLog, fields map[string]json.RawMessage)
 }
 
 // writeUpstreamError rewrites an upstream error response into OpenRouter's error
-// envelope. The upstream status is preserved.
-func writeUpstreamError(w http.ResponseWriter, resp *http.Response, providerName string) error {
+// envelope. The upstream status is preserved. The upstream message is recorded
+// on the access log so a failed request names its reason, not just the code.
+func writeUpstreamError(w http.ResponseWriter, lr *requestLog, resp *http.Response, providerName string) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamErrorBytes))
 	if err != nil {
 		return err
+	}
+	if lr != nil {
+		lr.errorDetail = upstreamErrorDetail(body)
 	}
 	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	_, err = w.Write(openroutercompat.NormalizeError(body, providerName, resp.StatusCode))
 	return err
+}
+
+// upstreamErrorDetail renders an upstream error body as a short single-line
+// access-log message.
+func upstreamErrorDetail(body []byte) string {
+	message := strings.Join(strings.Fields(openroutercompat.ErrorMessage(body)), " ")
+	if len(message) > upstreamErrorDetailLimit {
+		message = message[:upstreamErrorDetailLimit] + "..."
+	}
+	return message
 }
 
 // modelsPayload renders the model list in OpenRouter's shape.

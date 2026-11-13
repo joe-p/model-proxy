@@ -1040,7 +1040,7 @@ other request, with `path` set to `/admin/reload`.
 | `dropped_fields` | string[] | when non-empty | Request fields removed before the upstream call. |
 | `stream` | bool | when true | Response was streamed. |
 | `error_code` | string | on proxy-generated errors | Machine-readable error code. |
-| `error` | string | on proxy-generated errors | Human-readable error detail. |
+| `error` | string | when an error detail is known | Human-readable error detail, including the upstream message when one was returned. |
 | `client_canceled` | bool | when true | Client disconnected before completion. |
 | `prompt_tokens` | int | when usage observed | Input tokens. |
 | `completion_tokens` | int | when usage observed | Output tokens. |

@@ -200,7 +200,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	if resp.StatusCode >= 400 {
 		lr.errorCode = "upstream_error"
-		if err := writeUpstreamError(w, resp, model.Provider); err != nil && r.Context().Err() == nil {
+		if err := writeUpstreamError(w, lr, resp, model.Provider); err != nil && r.Context().Err() == nil {
 			lr.errorDetail = err.Error()
 		}
 		if r.Context().Err() != nil {

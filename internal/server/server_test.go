@@ -358,7 +358,7 @@ func TestChatPassesThroughUpstreamError(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	proxy, _ := newTestProxy(t, upstream.URL, nil)
+	proxy, logs := newTestProxy(t, upstream.URL, nil)
 	resp := postChat(t, proxy.URL, "test-key", `{"model":"fast","messages":[]}`)
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -382,6 +382,9 @@ func TestChatPassesThroughUpstreamError(t *testing.T) {
 	if envelope.Error.Metadata["provider_name"] != "openrouter" {
 		t.Fatalf("missing provider metadata: %s", body)
 	}
+	// The access log must name the reason, not just that upstream failed.
+	waitForLog(t, logs, `"error_code":"upstream_error"`)
+	waitForLog(t, logs, `"error":"rate limited"`)
 }
 
 func TestChatDropsOpenRouterOnlyFields(t *testing.T) {
